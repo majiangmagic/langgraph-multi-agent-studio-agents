@@ -1,9 +1,9 @@
-"""Public API for the scene_prompt_generator agent."""
+"""Public API for the prompt_aggregator agent."""
 
 
 def __getattr__(name: str):
     if name == "create_graph":
-        from app.agents.prompt_generation.scene_prompt_generator.graph import create_graph
+        from app.agents.prompt_generation.prompt_aggregator.graph import create_graph
 
         return create_graph
     raise AttributeError(name)
