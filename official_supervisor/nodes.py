@@ -8,11 +8,18 @@ from app.agents.official_supervisor.official_runtime import OfficialSupervisorRu
 from app.agents.official_supervisor.state import SupervisorState
 
 
-def official_supervisor_node(
-    state: SupervisorState,
-    config: RunnableConfig | None = None,
-) -> Dict[str, Any]:
-    """Run the official supervisor runtime for the current agent state."""
+class OfficialSupervisorNode:
+    """Object-oriented node adapter for the official supervisor runtime."""
 
-    runtime = OfficialSupervisorRuntime().with_state_config(state)
-    return runtime.invoke(state, config=config)
+    def __init__(self, runtime: OfficialSupervisorRuntime | None = None) -> None:
+        self.runtime = runtime or OfficialSupervisorRuntime()
+
+    def __call__(
+        self,
+        state: SupervisorState,
+        config: RunnableConfig | None = None,
+    ) -> Dict[str, Any]:
+        """Run the supervisor runtime for the current agent state."""
+
+        runtime = self.runtime.with_state_config(state)
+        return runtime.invoke(state, config=config)
