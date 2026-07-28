@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
@@ -16,20 +15,18 @@ from app.runtime.langgraph.events import emit_event
 from app.runtime.llm.provider import ai_provider
 
 
-class JsonSafeConverter:
+def json_safe(value: Any) -> Any:
     """Convert runtime values into JSON-safe control context values."""
 
-    @classmethod
-    def convert(cls, value: Any) -> Any:
-        if value is None or isinstance(value, (str, int, float, bool)):
-            return value
-        if isinstance(value, dict):
-            return {str(key): cls.convert(item) for key, item in value.items()}
-        if isinstance(value, (list, tuple, set)):
-            return [cls.convert(item) for item in value]
-        if isinstance(value, BaseMessage):
-            return {"type": value.type, "content": str(value.content)}
-        return str(value)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [json_safe(item) for item in value]
+    if isinstance(value, BaseMessage):
+        return {"type": value.type, "content": str(value.content)}
+    return str(value)
 
 
 @tool
@@ -43,110 +40,60 @@ def request_user_input(
     return "The workflow will pause and pass the user's answer back to you."
 
 
-class SupervisorAgentConfigResolver:
-    """Resolve the local Agent configuration assigned to a Supervisor node."""
+class WorkflowSupervisor:
+    """Build and run one constrained routing agent inside an outer workflow."""
 
-    @staticmethod
-    def resolve(
-        agents: list[Dict[str, Any]],
+    def __init__(
+        self,
+        *,
         node_name: str,
-    ) -> Dict[str, Any]:
+        agents: list[Dict[str, Any]],
+        worker_names: list[str],
+        allow_finish_workflow: bool,
+    ) -> None:
+        self.node_name = node_name
+        self.worker_names = worker_names
+        self.allow_finish_workflow = allow_finish_workflow
+        self.supervisor_config = self.resolve_config(agents)
+        self.worker_descriptions = self.describe_workers(agents)
+        self.tools, self.route_targets = self.create_tools()
+        self.model = ai_provider.get_model(
+            model_name=(
+                self.supervisor_config.get("model") or ai_provider.SUPERVISOR_MODEL
+            ),
+            temperature=self.supervisor_config.get("temperature", 0.2),
+        ).bind_tools(self.tools)
+
+    def resolve_config(self, agents: list[Dict[str, Any]]) -> Dict[str, Any]:
+        """Resolve the local Agent configuration assigned to this node."""
+
         for config in agents:
             identifier = str(config.get("id") or "")
-            if identifier.endswith(f":{node_name}") or config.get("name") == node_name:
+            if (
+                identifier.endswith(f":{self.node_name}")
+                or config.get("name") == self.node_name
+            ):
                 return config
-        raise ValueError(f"Supervisor node '{node_name}' has no local Agent config")
-
-
-class SupervisorToolCallReader:
-    """Read the latest structured decision made by the Supervisor model."""
-
-    @staticmethod
-    def latest(state: SupervisorState) -> Dict[str, Any]:
-        for message in reversed(state.get("messages") or []):
-            if isinstance(message, AIMessage) and message.tool_calls:
-                return message.tool_calls[0]
         raise ValueError(
-            "Supervisor must select exactly one routing or clarification tool"
+            f"Supervisor node '{self.node_name}' has no local Agent config"
         )
 
+    def describe_workers(self, agents: list[Dict[str, Any]]) -> str:
+        """Render the workers exposed by the outer workflow."""
 
-class SupervisorControlContextBuilder:
-    """Build the execution report supplied to the Supervisor model."""
-
-    def __init__(self, worker_names: list[str]) -> None:
-        self.worker_names = worker_names
-
-    def build(self, state: SupervisorState) -> Dict[str, Any]:
-        worker_runs = {name: 0 for name in self.worker_names}
-        worker_reports: Dict[str, Dict[str, Any]] = {}
-        last_worker = None
-
-        for message in state.get("messages") or []:
-            if not isinstance(message, AIMessage):
-                continue
-            for tool_call in message.tool_calls:
-                tool_name = str(tool_call.get("name") or "")
-                if not tool_name.startswith("route_to_"):
-                    continue
-                worker_name = tool_name.removeprefix("route_to_")
-                if worker_name in worker_runs:
-                    worker_runs[worker_name] += 1
-                    last_worker = worker_name
-
-        agents = state.get("agents") or {}
-        for worker_name, agent in agents.items():
-            results = agent.get("results") or {}
-            has_result = any(
-                value not in (None, "", [], {}) for value in results.values()
-            )
-            if worker_name in worker_runs and has_result:
-                worker_runs[worker_name] = max(worker_runs[worker_name], 1)
-
-            status = agent.get("status")
-            error = agent.get("error")
-            has_report = has_result or error or status not in (None, "", "idle")
-            if worker_name in worker_runs and has_report:
-                worker_reports[worker_name] = {
-                    "status": status,
-                    "error": error,
-                    "results": JsonSafeConverter.convert(results),
-                }
-
-        last_agent = agents.get(last_worker or "") or {}
-        last_report = None
-        if last_worker:
-            last_report = {
-                "status": last_agent.get("status"),
-                "error": last_agent.get("error"),
-                "results": JsonSafeConverter.convert(last_agent.get("results")),
-            }
-
-        return {
-            "worker_runs": {
-                name: count for name, count in worker_runs.items() if count
-            },
-            # Directly connected workers do not create Supervisor route messages.
-            # Include every completed report so the Supervisor sees stage outputs.
-            "worker_reports": worker_reports,
-            "last_worker": last_worker,
-            "last_report": last_report,
+        worker_configs = {
+            str(config.get("id") or "").rsplit(":", 1)[-1]: config
+            for config in agents
         }
+        return "\n".join(
+            f"- {worker_name}: "
+            f"{worker_configs.get(worker_name, {}).get('description') or worker_name}"
+            for worker_name in self.worker_names
+        )
 
+    def create_route_tool(self, target: str) -> BaseTool:
+        """Create one model tool for selecting an allowed workflow target."""
 
-@dataclass(frozen=True)
-class SupervisorToolSet:
-    """Routing tools and their outer Workflow node targets."""
-
-    tools: list[BaseTool]
-    route_targets: Dict[str, str]
-
-
-class SupervisorToolFactory:
-    """Create the constrained tools exposed to the Supervisor model."""
-
-    @staticmethod
-    def create_route_tool(target: str) -> BaseTool:
         tool_name = "finish_workflow" if target == "END" else f"route_to_{target}"
         description = (
             "Finish the workflow and return its current final result"
@@ -160,56 +107,60 @@ class SupervisorToolFactory:
 
         return route
 
-    @classmethod
-    def create(
-        cls,
-        worker_names: list[str],
-        allow_finish_workflow: bool,
-    ) -> SupervisorToolSet:
+    def create_tools(self) -> tuple[list[BaseTool], Dict[str, str]]:
+        """Create constrained model tools and their workflow targets."""
+
         route_targets = {
-            **{f"route_to_{worker_name}": worker_name for worker_name in worker_names},
-            **({"finish_workflow": "END"} if allow_finish_workflow else {}),
+            **{
+                f"route_to_{worker_name}": worker_name
+                for worker_name in self.worker_names
+            },
+            **({"finish_workflow": "END"} if self.allow_finish_workflow else {}),
         }
-        route_names = [
-            *worker_names,
-            *(["END"] if allow_finish_workflow else []),
+        targets = [
+            *self.worker_names,
+            *(["END"] if self.allow_finish_workflow else []),
         ]
         tools = [
             request_user_input,
-            *[cls.create_route_tool(name) for name in route_names],
+            *[self.create_route_tool(target) for target in targets],
         ]
-        return SupervisorToolSet(tools=tools, route_targets=route_targets)
+        return tools, route_targets
 
+    def latest_tool_call(self, state: SupervisorState) -> Dict[str, Any]:
+        """Read the latest structured decision made by the model."""
 
-class SupervisorMessageBuilder:
-    """Build model messages from Agent configuration and Workflow state."""
-
-    def __init__(
-        self,
-        system_prompt: str,
-        worker_names: list[str],
-        worker_descriptions: str,
-        max_retries_per_node: int,
-        allow_finish_workflow: bool,
-    ) -> None:
-        self.system_prompt = system_prompt
-        self.worker_descriptions = worker_descriptions
-        self.max_worker_runs = max_retries_per_node + 1
-        self.allow_finish_workflow = allow_finish_workflow
-        self.control_context_builder = SupervisorControlContextBuilder(worker_names)
-
-    def build(self, state: SupervisorState) -> list[BaseMessage]:
-        control_context = self.control_context_builder.build(state)
-        memory_lines = [
-            f"- {memory.get('content')}"
-            for memory in state.get("long_term_memories") or []
-            if isinstance(memory, dict) and memory.get("content")
-        ]
-        memory_section = (
-            "\nLong-term memories:\n" + "\n".join(memory_lines)
-            if memory_lines
-            else ""
+        for message in reversed(state.get("messages") or []):
+            if isinstance(message, AIMessage) and message.tool_calls:
+                return message.tool_calls[0]
+        raise ValueError(
+            "Supervisor must select exactly one routing or clarification tool"
         )
+
+    def build_control_context(self, state: SupervisorState) -> Dict[str, Any]:
+        """Build concise delegated Agent execution reports for the model."""
+
+        agent_reports: Dict[str, Dict[str, Any]] = {}
+        for agent_name, agent_state in (state.get("agents") or {}).items():
+            results = agent_state.get("results") or {}
+            status = agent_state.get("status")
+            error = agent_state.get("error")
+            has_results = any(
+                value not in (None, "", [], {}) for value in results.values()
+            )
+            has_report = has_results or error or status not in (None, "", "idle")
+            if not has_report:
+                continue
+            agent_reports[agent_name] = {
+                "status": status,
+                "error": error,
+                "results": json_safe(results),
+            }
+        return {"agent_reports": agent_reports}
+
+    def build_messages(self, state: SupervisorState) -> list[BaseMessage]:
+        """Build the routing prompt from configuration and current state."""
+
         finish_policy = (
             "Call finish_workflow only when the final output is ready."
             if self.allow_finish_workflow
@@ -222,52 +173,41 @@ You supervise an explicit LangGraph workflow. Select the next node by calling
 exactly one route_to_* tool. {finish_policy} Available workers:
 {self.worker_descriptions}
 
-- Inspect the latest worker result before selecting the next node.
-- Inspect worker_reports for outputs produced by directly connected stage nodes.
-- Do not run a worker more than {self.max_worker_runs} times per turn.
+- Inspect agent_reports before selecting the next Agent.
 - If required user information is missing, call request_user_input.
 - Do not fabricate business output or bypass the declared workflow order.
 
 Current control state:
-{json.dumps(control_context, ensure_ascii=False)}
+{json.dumps(self.build_control_context(state), ensure_ascii=False)}
 """
+        system_prompt = str(
+            self.supervisor_config.get("system_prompt") or ""
+        ).strip()
         return [
-            SystemMessage(
-                content=f"{self.system_prompt}{policy}{memory_section}"
-            ),
+            SystemMessage(content=f"{system_prompt}{policy}"),
             *state.get("messages", []),
         ]
 
+    async def decide(self, state: SupervisorState) -> Dict[str, Any]:
+        """Request exactly one constrained routing decision from the model."""
 
-class SupervisorDecisionNode:
-    """Ask the model for exactly one constrained routing decision."""
-
-    def __init__(self, model: Any, message_builder: SupervisorMessageBuilder) -> None:
-        self.model = model
-        self.message_builder = message_builder
-
-    async def __call__(self, state: SupervisorState) -> Dict[str, Any]:
-        response = await self.model.ainvoke(self.message_builder.build(state))
+        response = await self.model.ainvoke(self.build_messages(state))
         if not isinstance(response, AIMessage) or len(response.tool_calls) != 1:
             raise ValueError(
                 "Supervisor must call exactly one routing or clarification tool"
             )
         return {"messages": [response], "next_node": ""}
 
+    def route_decision(self, state: SupervisorState) -> str:
+        """Route the tool call to clarification or target selection."""
 
-class SupervisorDecisionRouter:
-    """Route a Supervisor decision to clarification or route selection."""
-
-    def __call__(self, state: SupervisorState) -> str:
-        tool_name = str(SupervisorToolCallReader.latest(state).get("name") or "")
+        tool_name = str(self.latest_tool_call(state).get("name") or "")
         return "clarify" if tool_name == "request_user_input" else "select_route"
 
+    def clarify(self, state: SupervisorState) -> Dict[str, Any]:
+        """Pause the graph and return the user's answer to the model."""
 
-class SupervisorClarificationNode:
-    """Pause the graph and return the user's answer to the Supervisor model."""
-
-    def __call__(self, state: SupervisorState) -> Dict[str, Any]:
-        tool_call = SupervisorToolCallReader.latest(state)
+        tool_call = self.latest_tool_call(state)
         arguments = tool_call.get("args") or {}
         payload = {
             "kind": "workflow.clarification",
@@ -293,7 +233,7 @@ class SupervisorClarificationNode:
                     content=json.dumps(
                         {
                             "status": "user_replied",
-                            "answer": JsonSafeConverter.convert(answer),
+                            "answer": json_safe(answer),
                         },
                         ensure_ascii=False,
                     ),
@@ -305,15 +245,10 @@ class SupervisorClarificationNode:
             ]
         }
 
+    def select_route(self, state: SupervisorState) -> Dict[str, Any]:
+        """Validate the selected tool and publish the outer workflow target."""
 
-class SupervisorRouteSelectionNode:
-    """Validate the selected tool and write its target to ``next_node``."""
-
-    def __init__(self, route_targets: Dict[str, str]) -> None:
-        self.route_targets = route_targets
-
-    def __call__(self, state: SupervisorState) -> Dict[str, Any]:
-        tool_call = SupervisorToolCallReader.latest(state)
+        tool_call = self.latest_tool_call(state)
         tool_name = str(tool_call.get("name") or "")
         if tool_name not in self.route_targets:
             raise ValueError(f"Unknown Supervisor routing tool: {tool_name}")
@@ -330,71 +265,17 @@ class SupervisorRouteSelectionNode:
             ],
         }
 
-
-class WorkflowSupervisorGraphBuilder:
-    """Assemble the constrained Supervisor Agent with native LangGraph APIs."""
-
-    def __init__(
-        self,
-        *,
-        node_name: str,
-        agents: list[Dict[str, Any]],
-        worker_names: list[str],
-        max_retries_per_node: int = 2,
-        allow_finish_workflow: bool = True,
-    ) -> None:
-        self.node_name = node_name
-        self.agents = agents
-        self.worker_names = worker_names
-        self.max_retries_per_node = max_retries_per_node
-        self.allow_finish_workflow = allow_finish_workflow
-
     def build_graph(self):
-        supervisor_config = SupervisorAgentConfigResolver.resolve(
-            self.agents,
-            self.node_name,
-        )
-        worker_configs = {
-            str(config.get("id") or "").rsplit(":", 1)[-1]: config
-            for config in self.agents
-        }
-        worker_descriptions = "\n".join(
-            f"- {worker_name}: "
-            f"{worker_configs.get(worker_name, {}).get('description') or worker_name}"
-            for worker_name in self.worker_names
-        )
-        tool_set = SupervisorToolFactory.create(
-            self.worker_names,
-            self.allow_finish_workflow,
-        )
-        model = ai_provider.get_model(
-            model_name=supervisor_config.get("model") or ai_provider.SUPERVISOR_MODEL,
-            temperature=supervisor_config.get("temperature", 0.2),
-        ).bind_tools(tool_set.tools)
-        message_builder = SupervisorMessageBuilder(
-            system_prompt=str(
-                supervisor_config.get("system_prompt") or ""
-            ).strip(),
-            worker_names=self.worker_names,
-            worker_descriptions=worker_descriptions,
-            max_retries_per_node=self.max_retries_per_node,
-            allow_finish_workflow=self.allow_finish_workflow,
-        )
+        """Assemble the constrained agent with native LangGraph APIs."""
 
         graph = StateGraph(SupervisorState)
-        graph.add_node(
-            "decide",
-            SupervisorDecisionNode(model, message_builder),
-        )
-        graph.add_node("clarify", SupervisorClarificationNode())
-        graph.add_node(
-            "select_route",
-            SupervisorRouteSelectionNode(tool_set.route_targets),
-        )
+        graph.add_node("decide", self.decide)
+        graph.add_node("clarify", self.clarify)
+        graph.add_node("select_route", self.select_route)
         graph.set_entry_point("decide")
         graph.add_conditional_edges(
             "decide",
-            SupervisorDecisionRouter(),
+            self.route_decision,
             {"clarify": "clarify", "select_route": "select_route"},
         )
         graph.add_edge("clarify", "decide")
@@ -410,12 +291,15 @@ def create_workflow_supervisor_graph(
     max_retries_per_node: int = 2,
     allow_finish_workflow: bool = True,
 ):
-    """Create a Supervisor Agent that writes its choice to ``next_node``."""
+    """Create a Supervisor Agent that writes its choice to ``next_node``.
 
-    return WorkflowSupervisorGraphBuilder(
+    ``max_retries_per_node`` remains accepted for compatibility with older
+    generated workflows. Retry limits now belong to the outer workflow graph.
+    """
+
+    return WorkflowSupervisor(
         node_name=node_name,
         agents=agents,
         worker_names=worker_names,
-        max_retries_per_node=max_retries_per_node,
         allow_finish_workflow=allow_finish_workflow,
     ).build_graph()

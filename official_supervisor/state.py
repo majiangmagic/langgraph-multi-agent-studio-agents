@@ -57,5 +57,4 @@ class SupervisorState(TypedDict):
     action: Optional[SupervisorAction]
     agents: Dict[str, DelegatedAgentState]
     next_node: NotRequired[str]
-    long_term_memories: NotRequired[List[Dict[str, Any]]]
     remaining_steps: NotRequired[RemainingSteps]
