@@ -1,6 +1,5 @@
 """Official supervisor agent public API."""
 
-from app.agents.official_supervisor.official_runtime import OfficialSupervisorRuntime
 from app.agents.official_supervisor.state import (
     DelegatedAgentState,
     SupervisorAction,
@@ -22,7 +21,6 @@ def __getattr__(name: str):
 
 __all__ = [
     "DelegatedAgentState",
-    "OfficialSupervisorRuntime",
     "SupervisorAction",
     "SupervisorState",
     "create_graph",
