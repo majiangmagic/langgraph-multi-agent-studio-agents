@@ -1,33 +1,36 @@
-"""Declarative spec for the official supervisor agent."""
+"""Declarative spec for the official_supervisor agent."""
 
 from langgraph.graph import END
 
-from app.runtime.langgraph.agent_definition import AgentDefinition, AgentEdgeSpec, AgentNodeSpec
-from app.agents.official_supervisor.nodes import OfficialSupervisorNode
-from app.agents.official_supervisor.official_runtime import OfficialSupervisorRuntime
+from app.runtime.langgraph.agent_definition import (
+    AgentDefinition,
+    AgentEdgeSpec,
+    AgentNodeSpec,
+)
+from app.agents.official_supervisor.nodes import official_supervisor_node
 from app.agents.official_supervisor.state import SupervisorState
 
 OFFICIAL_SUPERVISOR_AGENT_NAME = "official_supervisor"
-OFFICIAL_SUPERVISOR_NODE_NAME = "official_supervisor"
+OFFICIAL_SUPERVISOR_ENTRYPOINT = "official_supervisor"
 
 
-def create_official_supervisor_node() -> OfficialSupervisorNode:
-    """Create the runtime node for the official supervisor engine."""
+def create_official_supervisor_node():
+    """Create the official supervisor node callable."""
 
-    return OfficialSupervisorNode(OfficialSupervisorRuntime())
+    return official_supervisor_node
 
 
 AGENT_DEFINITION = AgentDefinition(
     name=OFFICIAL_SUPERVISOR_AGENT_NAME,
     state_schema=SupervisorState,
-    entrypoint=OFFICIAL_SUPERVISOR_NODE_NAME,
+    entrypoint=OFFICIAL_SUPERVISOR_ENTRYPOINT,
     nodes=[
         AgentNodeSpec(
-            name=OFFICIAL_SUPERVISOR_NODE_NAME,
+            name="official_supervisor",
             factory=create_official_supervisor_node,
         ),
     ],
     edges=[
-        AgentEdgeSpec(source=OFFICIAL_SUPERVISOR_NODE_NAME, target=END),
+        AgentEdgeSpec(source="official_supervisor", target=END),
     ],
 )
