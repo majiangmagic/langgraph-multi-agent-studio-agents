@@ -1,25 +1,25 @@
-"""Node handlers for the official supervisor agent."""
+"""Node handlers for the official supervisor Agent example."""
 
 from typing import Any, Dict
 
 from langchain_core.runnables import RunnableConfig
 
-from app.agents.official_supervisor.official_runtime import OfficialSupervisorRuntime
 from app.agents.official_supervisor.state import SupervisorState
 
 
-class OfficialSupervisorNode:
-    """Object-oriented node adapter for the official supervisor runtime."""
+class SupervisorExampleOnlyError(RuntimeError):
+    """Raised when the non-runnable supervisor example is invoked."""
 
-    def __init__(self, runtime: OfficialSupervisorRuntime | None = None) -> None:
-        self.runtime = runtime or OfficialSupervisorRuntime()
+
+class SupervisorExampleNode:
+    """Fail-fast node retained only to demonstrate an Agent graph skeleton."""
 
     def __call__(
         self,
         state: SupervisorState,
         config: RunnableConfig | None = None,
     ) -> Dict[str, Any]:
-        """Run the supervisor runtime for the current agent state."""
-
-        runtime = self.runtime.with_state_config(state)
-        return runtime.invoke(state, config=config)
+        raise SupervisorExampleOnlyError(
+            "official_supervisor is an example Agent skeleton and has no standalone "
+            "runtime. Use create_workflow_supervisor_graph inside a real workflow."
+        )
