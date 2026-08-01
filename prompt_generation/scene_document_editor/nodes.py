@@ -212,14 +212,37 @@ def active_constraints(prompt_ir: Dict[str, Any]) -> list[Dict[str, Any]]:
 def fallback_patch(
     document: Dict[str, Any], user_input: str, request_id: str = ""
 ) -> Dict[str, Any]:
-    """Preserve corrections safely; ask only when the edit is genuinely unclear."""
+    """Preserve corrections and create a source document when the model is unavailable."""
 
-    if (
-        int(document.get("version") or 0) > 0
-        and is_clear_correction(user_input)
-    ):
+    current_version = int(document.get("version") or 0)
+    normalized_input = user_input.strip()
+
+    if current_version == 0 and normalized_input:
+        from app.domains.prompt_generation.domain import empty_scene_document
+
+        initial_document = empty_scene_document()
+        initial_document["summary"] = normalized_input
+        initial_document["requirements"]["required"] = [normalized_input]
         return {
-            "base_version": int(document.get("version") or 0),
+            "base_version": 0,
+            "request_id": request_id,
+            "intent": "create_scene",
+            "operations": [
+                {
+                    "op": "replace",
+                    "path": "/",
+                    "value": initial_document,
+                    "evidence": normalized_input,
+                }
+            ],
+            "touched_paths": ["/"],
+            "clarification": None,
+            "clarification_options": [],
+        }
+
+    if current_version > 0 and is_clear_correction(normalized_input):
+        return {
+            "base_version": current_version,
             "request_id": request_id,
             "intent": "preserve_and_emphasize",
             "operations": [
@@ -236,7 +259,7 @@ def fallback_patch(
         }
 
     return {
-        "base_version": int(document.get("version") or 0),
+        "base_version": current_version,
         "request_id": request_id,
         "intent": "needs_clarification",
         "operations": [],
