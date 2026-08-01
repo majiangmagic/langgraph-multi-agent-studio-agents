@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool, tool
 from langgraph.graph import END, StateGraph
-from langgraph.types import interrupt
 
 from app.agents.official_supervisor.state import SupervisorState
-from app.runtime.langgraph.events import emit_event
 from app.runtime.llm.provider import ai_provider
 
 
@@ -27,17 +25,6 @@ def json_safe(value: Any) -> Any:
     if isinstance(value, BaseMessage):
         return {"type": value.type, "content": str(value.content)}
     return str(value)
-
-
-@tool
-def request_user_input(
-    question: str,
-    options: Optional[list[str]] = None,
-    context: str = "",
-) -> str:
-    """Pause the workflow and request information required to continue."""
-
-    return "The workflow will pause and pass the user's answer back to you."
 
 
 class WorkflowSupervisor:
@@ -121,10 +108,7 @@ class WorkflowSupervisor:
             *self.worker_names,
             *(["END"] if self.allow_finish_workflow else []),
         ]
-        tools = [
-            request_user_input,
-            *[self.create_route_tool(target) for target in targets],
-        ]
+        tools = [self.create_route_tool(target) for target in targets]
         return tools, route_targets
 
     def latest_tool_call(self, state: SupervisorState) -> Dict[str, Any]:
@@ -134,7 +118,7 @@ class WorkflowSupervisor:
             if isinstance(message, AIMessage) and message.tool_calls:
                 return message.tool_calls[0]
         raise ValueError(
-            "Supervisor must select exactly one routing or clarification tool"
+            "Supervisor must select exactly one routing tool"
         )
 
     def build_control_context(self, state: SupervisorState) -> Dict[str, Any]:
@@ -153,8 +137,8 @@ class WorkflowSupervisor:
                 continue
             agent_reports[agent_name] = {
                 "status": status,
-                "error": error,
-                "results": json_safe(results),
+                "completed": has_results,
+                "error": json_safe(error),
             }
         return {"agent_reports": agent_reports}
 
@@ -173,9 +157,10 @@ You supervise an explicit LangGraph workflow. Select the next node by calling
 exactly one route_to_* tool. {finish_policy} Available workers:
 {self.worker_descriptions}
 
-- Inspect agent_reports before selecting the next Agent.
-- If required user information is missing, call request_user_input.
-- Do not fabricate business output or bypass the declared workflow order.
+- Use agent_reports only as execution metadata for routing.
+- Do not inspect, validate, transform, summarize, or generate business output.
+- Do not ask the user questions; clarification belongs to worker Agents.
+- Do not bypass the declared workflow order.
 
 Current control state:
 {json.dumps(self.build_control_context(state), ensure_ascii=False)}
@@ -197,53 +182,6 @@ Current control state:
                 "Supervisor must call exactly one routing or clarification tool"
             )
         return {"messages": [response], "next_node": ""}
-
-    def route_decision(self, state: SupervisorState) -> str:
-        """Route the tool call to clarification or target selection."""
-
-        tool_name = str(self.latest_tool_call(state).get("name") or "")
-        return "clarify" if tool_name == "request_user_input" else "select_route"
-
-    def clarify(self, state: SupervisorState) -> Dict[str, Any]:
-        """Pause the graph and return the user's answer to the model."""
-
-        tool_call = self.latest_tool_call(state)
-        arguments = tool_call.get("args") or {}
-        payload = {
-            "kind": "workflow.clarification",
-            "question": str(arguments.get("question") or "").strip(),
-            "options": [
-                str(option)
-                for option in (arguments.get("options") or [])
-                if str(option).strip()
-            ][:4],
-            "context": str(arguments.get("context") or "").strip(),
-        }
-        emit_event(
-            {
-                "object": "workflow.event",
-                "type": "workflow.interrupted",
-                "interrupt": payload,
-            }
-        )
-        answer = interrupt(payload)
-        return {
-            "messages": [
-                ToolMessage(
-                    content=json.dumps(
-                        {
-                            "status": "user_replied",
-                            "answer": json_safe(answer),
-                        },
-                        ensure_ascii=False,
-                    ),
-                    name="request_user_input",
-                    tool_call_id=str(
-                        tool_call.get("id") or "request-user-input"
-                    ),
-                )
-            ]
-        }
 
     def select_route(self, state: SupervisorState) -> Dict[str, Any]:
         """Validate the selected tool and publish the outer workflow target."""
@@ -270,15 +208,9 @@ Current control state:
 
         graph = StateGraph(SupervisorState)
         graph.add_node("decide", self.decide)
-        graph.add_node("clarify", self.clarify)
         graph.add_node("select_route", self.select_route)
         graph.set_entry_point("decide")
-        graph.add_conditional_edges(
-            "decide",
-            self.route_decision,
-            {"clarify": "clarify", "select_route": "select_route"},
-        )
-        graph.add_edge("clarify", "decide")
+        graph.add_edge("decide", "select_route")
         graph.add_edge("select_route", END)
         return graph.compile()
 
