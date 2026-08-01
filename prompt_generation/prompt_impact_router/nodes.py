@@ -13,15 +13,23 @@ from app.agents.prompt_generation.prompt_impact_router.state import PromptImpact
 # - 新 DSL 删除某个节点名时，对应代码块会被删除，不会因为里面有人写过代码而保留。
 
 # <agent-node name="route_impact">
-def route_impact_node(
-    state: PromptImpactRouterState,
-    config: RunnableConfig | None = None,
-) -> Dict[str, Any]:
-    """Expose deterministic branch decisions from the current ImpactSet."""
+class RouteImpactNode:
+    """Handle the route impact stage."""
 
-    impact = state.get("impact_set") or {}
-    return {
-        "should_resolve_identity": bool(impact.get("identity_changed")),
-        "should_resolve_visual": bool(impact.get("visual_changed")),
-    }
+    def __call__(
+        self,
+        state: PromptImpactRouterState,
+        config: RunnableConfig | None = None,
+    ) -> Dict[str, Any]:
+        """Expose deterministic branch decisions from the current ImpactSet."""
+
+        impact = state.get("impact_set") or {}
+        return {
+            "should_resolve_identity": bool(impact.get("identity_changed")),
+            "should_resolve_visual": bool(impact.get("visual_changed")),
+        }
 # </agent-node>
+
+
+# Transitional callable aliases for existing integrations.
+route_impact_node = RouteImpactNode()
