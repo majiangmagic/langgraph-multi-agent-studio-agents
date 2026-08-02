@@ -208,16 +208,17 @@ def fallback_relation_terms(document: Dict[str, Any]) -> list[Dict[str, Any]]:
             )
     for key in ("positive", "required"):
         for index, value in enumerate((document.get("requirements") or {}).get(key) or []):
-            terms.append(
-                {
-                    "value": value,
-                    "kind": "descriptive_phrase",
-                    "polarity": "positive",
-                    "source_path": f"/requirements/{key}/{index}",
-                    "provenance": "document",
-                    "inferred": False,
-                }
-            )
+            if not contains_cjk(value):
+                terms.append(
+                    {
+                        "value": value,
+                        "kind": "descriptive_phrase",
+                        "polarity": "positive",
+                        "source_path": f"/requirements/{key}/{index}",
+                        "provenance": "document",
+                        "inferred": False,
+                    }
+                )
     return terms
 
 
@@ -592,7 +593,7 @@ class ResolveVisualSemanticsNode:
         if not negative_terms:
             negative_terms = [
                 {
-                    "value": value,
+                    "value": str(value).strip(),
                     "kind": "negative_phrase",
                     "polarity": "negative",
                     "source_path": f"/requirements/{key}/{index}",
@@ -601,6 +602,7 @@ class ResolveVisualSemanticsNode:
                 }
                 for key in ("negative", "forbidden")
                 for index, value in enumerate((document.get("requirements") or {}).get(key) or [])
+                if str(value).strip() and not contains_cjk(value)
             ]
         atomic_terms = merge_incremental_terms(
             previous_ir.get("atomic_terms"), atomic_terms, touched_paths
@@ -611,6 +613,22 @@ class ResolveVisualSemanticsNode:
         negative_terms = merge_incremental_terms(
             previous_ir.get("negative_terms"), negative_terms, touched_paths
         )
+
+        # Prompt IR is renderer-facing. Never carry source-language phrases
+        # forward from an older incremental result. The original wording stays
+        # in SceneDocument for display and later user clarification.
+        atomic_terms = [
+            item for item in atomic_terms
+            if not contains_cjk(item.get("value"))
+        ]
+        relation_terms = [
+            item for item in relation_terms
+            if not contains_cjk(item.get("value"))
+        ]
+        negative_terms = [
+            item for item in negative_terms
+            if not contains_cjk(item.get("value"))
+        ]
         return {
             "atomic_terms": atomic_terms,
             "relation_terms": relation_terms,

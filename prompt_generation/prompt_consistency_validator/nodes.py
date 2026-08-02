@@ -1,10 +1,14 @@
 """Business nodes for the prompt_consistency_validator agent."""
 
+import logging
 from typing import Any, Dict
 
 from langchain_core.runnables import RunnableConfig
 
 from app.agents.prompt_generation.prompt_consistency_validator.state import PromptConsistencyValidatorState
+
+logger = logging.getLogger(__name__)
+MAX_AUTOMATIC_REPAIRS = 3
 
 # 本文件由 scripts/generate_agent.py 刷新骨架。
 # 中文注意：
@@ -315,6 +319,28 @@ class FinalizeValidationNode:
         else:
             next_step = "finish"
         retry_count = int(state.get("retry_count") or 0) + (0 if next_step == "finish" else 1)
+        if next_step != "finish" and retry_count >= MAX_AUTOMATIC_REPAIRS:
+            logger.warning(
+                "PROMPT_CHECKER_STOPPING_AUTOMATIC_REPAIR retry_count=%s issue_codes=%s",
+                retry_count,
+                sorted(issue_codes),
+            )
+            next_step = "ask_user"
+        logger.warning(
+            "PROMPT_CHECKER_DECISION next_step=%s retry_count=%s issue_codes=%s "
+            "missing_paths=%s covered=%s required=%s conflicts=%s "
+            "document_version=%s positive_terms=%s negative_terms=%s",
+            next_step,
+            retry_count,
+            sorted(issue_codes),
+            sorted(normalized_report.get("missing_paths") or []),
+            normalized_report.get("covered_path_count", 0),
+            normalized_report.get("required_path_count", 0),
+            normalized_report.get("conflicting_terms") or [],
+            (state.get("scene_document") or {}).get("version"),
+            "unknown",
+            "unknown",
+        )
         return {
             "validation_report": normalized_report,
             "needs_repair": report.needs_repair,
@@ -324,6 +350,12 @@ class FinalizeValidationNode:
             "check_passed": not bool(normalized_report.get("issues")),
             "next_step": next_step,
             "problem_summary": "; ".join(issue.get("message", "") for issue in normalized_report.get("issues", [])),
+            "clarification_request": (
+                "???????????????"
+                + "; ".join(issue.get("message", "") for issue in normalized_report.get("issues", []))
+                if next_step == "ask_user"
+                else ""
+            ),
             "problem_details": normalized_report.get("issues", []),
             "affected_parts": affected_parts,
             "retry_count": retry_count,

@@ -106,7 +106,11 @@ class RenderPromptNode:
         profile = PROFILES[target_model]
         prompt_ir = state.get("resolved_prompt_ir") or {}
         report = state.get("validation_report") or {}
-        clarification = str(state.get("clarification_request") or "").strip()
+        clarification = str(
+            state.get("clarification_request")
+            or state.get("checker_clarification_request")
+            or ""
+        ).strip()
         clarification_options = list(state.get("clarification_options") or [])
         issue_codes = list(report.get("issue_codes") or [])
         blocked = bool(report.get("blocked"))
