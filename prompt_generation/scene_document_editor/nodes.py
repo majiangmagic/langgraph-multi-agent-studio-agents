@@ -134,6 +134,19 @@ def is_clear_correction(user_input: str) -> bool:
     return bool(normalized) and any(marker in normalized for marker in CORRECTION_MARKERS)
 
 
+def has_ambiguous_edit_reference(user_input: str) -> bool:
+    """Detect edits whose target cannot be inferred from the current scene."""
+
+    normalized = user_input.strip().casefold()
+    if not normalized:
+        return False
+    ambiguous_references = ("?", "?", "?", "??", "??", "this", "that", "her", "him", "it")
+    edit_verbs = ("?", "?", "?", "??", "??", "change", "replace", "remove", "delete")
+    return any(value in normalized for value in ambiguous_references) and any(
+        value in normalized for value in edit_verbs
+    )
+
+
 GENERIC_CLARIFICATION_MARKERS = (
     "意图不明确",
     "意图不清楚",
@@ -155,6 +168,21 @@ def is_unhelpful_initial_clarification(
     if not clarification:
         return False
     return any(marker in clarification for marker in GENERIC_CLARIFICATION_MARKERS)
+
+
+def is_unhelpful_edit_clarification(
+    document: Dict[str, Any], user_input: str, proposal: Dict[str, Any]
+) -> bool:
+    """Reject generic clarification when the existing scene gives context."""
+
+    if int(document.get("version") or 0) <= 0 or not user_input.strip():
+        return False
+    if proposal.get("operations"):
+        return False
+    clarification = str(proposal.get("clarification") or "").strip().casefold()
+    return bool(clarification) and any(
+        marker in clarification for marker in GENERIC_CLARIFICATION_MARKERS
+    )
 
 
 def parse_object(text: str) -> Dict[str, Any]:
@@ -251,6 +279,27 @@ def fallback_patch(
                     "path": "/requirements/required/-",
                     "value": user_input.strip(),
                     "evidence": user_input.strip(),
+                }
+            ],
+            "touched_paths": ["/requirements/required/-"],
+            "clarification": None,
+            "clarification_options": [],
+        }
+
+    if current_version > 0 and normalized_input and not has_ambiguous_edit_reference(normalized_input):
+        # A short follow-up is still a contextual edit. Preserve the user's
+        # wording as a requirement only when the model fallback is needed;
+        # the normal path remains model-driven and context-aware.
+        return {
+            "base_version": current_version,
+            "request_id": request_id,
+            "intent": "update_scene",
+            "operations": [
+                {
+                    "op": "add",
+                    "path": "/requirements/required/-",
+                    "value": normalized_input,
+                    "evidence": normalized_input,
                 }
             ],
             "touched_paths": ["/requirements/required/-"],
@@ -441,6 +490,17 @@ class ProposePatchNode:
     Use spatial.pose_analogy for an explicit visual analogy. Correct these existing
     paths for direction or placement feedback; never invent alternate spatial field
     names and never hide core geometry only in details.
+    Treat the latest message as an edit in the context of the complete current
+    SceneDocument, even when it is only a short noun or phrase. A short follow-up
+    such as a subject, action, state, effect, body detail, or style phrase is not
+    automatically ambiguous: infer what it modifies from the existing document and
+    create one or more executable operations. Do not require the user to repeat the
+    subject or describe a schema path. Use the most specific existing participant,
+    relation, or scene field supported by the document. If the phrase is a new fact
+    whose exact storage location is uncertain, add it to the narrowest semantically
+    appropriate existing list or requirement field rather than asking a generic
+    question. Clarify only when two or more existing references are genuinely
+    equally plausible, or when the request contains mutually exclusive meanings.
     When a reference is genuinely ambiguous, return no operations and place a short
     question in clarification instead of guessing.
     Active enrichments are model-added details visible in the last Prompt but absent
@@ -473,7 +533,10 @@ class ProposePatchNode:
             "Active constraint overlay:\n"
             f"{json.dumps(active_constraints(previous_ir), ensure_ascii=False)}\n\n"
             f"Latest user message:\n{user_input}\n\n"
-            "Return only the PatchProposal JSON."
+            "Interpret this message as a contextual incremental edit. First identify "
+            "the most likely existing subject or scene target from the document, then "
+            "emit executable operations. Do not return needs_clarification merely "
+            "because the message is short. Return only the PatchProposal JSON."
         )
         proposal: Dict[str, Any] = {}
         error = ""
@@ -503,6 +566,10 @@ class ProposePatchNode:
                     if is_unhelpful_initial_clarification(document, proposal):
                         raise ValueError(
                             "A concrete initial scene received only a generic clarification"
+                        )
+                    if is_unhelpful_edit_clarification(document, user_input, proposal):
+                        raise ValueError(
+                            "A contextual edit received only a generic clarification"
                         )
                     candidate = apply_patch_proposal(document, proposal)
                     if int(document.get("version") or 0) == 0 and proposal.get("operations"):
