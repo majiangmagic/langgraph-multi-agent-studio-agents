@@ -5,14 +5,17 @@ from app.agents.harness.harness_initializer.nodes import EnvironmentCheckerNode,
 HARNESS_INITIALIZER_AGENT_NAME = "harness_initializer"
 HARNESS_INITIALIZER_ENTRYPOINT = "environment_checker"
 HARNESS_TEMPLATE_DIRECTORY = "templates/harness"
-DEFAULT_DOCUMENTS = [
+REQUIRED_DOCUMENTS = [
     "AGENT.md",
+    "PLANER.md",
+    "RUNTIME.md",
+    "CHECKER.md",
     "ARCHITECTURE.md",
     "PROGRESS.md",
-    "FEATURES.md",
     "DECISIONS.md",
-    "PLANER.md",
+    "FEATURES.md",
 ]
+DEFAULT_DOCUMENTS = list(REQUIRED_DOCUMENTS)
 
 
 def create_environment_checker_node() -> EnvironmentCheckerNode:
