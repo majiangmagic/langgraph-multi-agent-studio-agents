@@ -1,0 +1,6 @@
+{
+  "name": "harness_initializer",
+  "display_name": "Harness Initializer",
+  "description": "Bootstrap a fresh project with Harness documents, bundled templates, and a local git repository.",
+  "config": {}
+}
