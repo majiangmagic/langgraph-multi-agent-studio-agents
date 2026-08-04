@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Object-oriented converter for Harness context documents."""
+"""Harness 上下文文件的编辑与读取工具。
+
+公开入口为 ``harness_context``：Editor 方法把 JSON 写成固定格式 Markdown；
+Reader 方法读取 Markdown 或 JSON，并输出完整内容、最新记录或关键词匹配记录。
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,7 @@ import json
 import re
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 JsonObject = dict[str, Any]
 
@@ -373,7 +377,7 @@ class FeaturesHandler(DocumentHandler):
     )
     ALLOWED_STATUSES = frozenset({"not_started", "in_progress", "blocked", "passing"})
     @classmethod
-    def _validate_features(cls, features: list[JsonObject]) -> None:
+    def validate_features(cls, features: list[JsonObject]) -> None:
         in_progress_count = 0
         for item in features:
             status = item["status"]
@@ -434,7 +438,7 @@ class FeaturesHandler(DocumentHandler):
                 f"- {self.labels['evidence']}{Text.COLON}{item['verification_evidence']}{Text.PERIOD}"
             )
             lines.append(f"- {self.labels['notes']}{Text.COLON}{item['notes']}{Text.PERIOD}")
-        self._validate_features(features)
+        self.validate_features(features)
         return "\n".join(lines) + "\n"
 
     def parse(self, markdown: str) -> JsonObject:
@@ -526,31 +530,15 @@ class FeaturesHandler(DocumentHandler):
             if cursor != len(block):
                 raise ValueError("unexpected content in feature block")
             features.append(item)
-        self._validate_features(features)
+        self.validate_features(features)
         return {"rules": list(self.RULES), "features": features}
 
 
-class DocumentRegistry:
-    """Registry that maps a document type to its handler."""
-
-    def __init__(self, handlers: Iterable[DocumentHandler]) -> None:
-        self._handlers = {handler.document_type: handler for handler in handlers}
-
-    def get(self, document_type: str) -> DocumentHandler:
-        try:
-            return self._handlers[document_type]
-        except KeyError as exc:
-            raise ValueError(f"unsupported document type: {document_type}") from exc
-
-    def choices(self) -> list[str]:
-        return sorted(self._handlers)
-
-
 class IndexService:
-    """Index and recency queries for decision and feature records."""
+    """为 DECISIONS 和 FEATURES 提供关键词及日期查询。"""
 
     @staticmethod
-    def _matches(data: JsonObject, collection: str, keyword: str) -> list[JsonObject]:
+    def matches(data: JsonObject, collection: str, keyword: str) -> list[JsonObject]:
         normalized = keyword.strip().casefold()
         if not normalized:
             raise ValueError("keyword must not be empty")
@@ -560,39 +548,40 @@ class IndexService:
             if any(normalized in entry.casefold() for entry in item.get("keywords", []))
         ]
 
-    def search(self, document_type: str, data: JsonObject, keyword: str) -> list[JsonObject]:
-        if document_type == "decisions":
-            return self._matches(data, "decisions", keyword)
-        if document_type == "features":
-            return self._matches(data, "features", keyword)
-        raise ValueError("search is only supported for decisions and features")
-
     @staticmethod
-    def _latest(
+    def latest_records(
         data: JsonObject,
         collection: str,
         record_name: str,
-        limit: int,
+        num: int,
     ) -> list[JsonObject]:
-        if limit < 1:
-            raise ValueError("limit must be greater than zero")
+        if num < 1:
+            raise ValueError("num must be greater than zero")
         records = data.get(collection, [])
         date_pattern = re.compile(r"\d{4}-\d{2}-\d{2}")
         for item in records:
             date = str(item.get("date", ""))
             if not date_pattern.fullmatch(date):
                 raise ValueError(f"{record_name} date must use YYYY-MM-DD")
-        return sorted(records, key=lambda item: item["date"], reverse=True)[:limit]
+        return sorted(records, key=lambda item: item["date"], reverse=True)[:num]
 
-    def latest_decisions(self, data: JsonObject, limit: int = 5) -> list[JsonObject]:
-        return self._latest(data, "decisions", "decision", limit)
+    def search(self, document_type: str, data: JsonObject, keyword: str) -> list[JsonObject]:
+        if document_type == "decisions":
+            return self.matches(data, "decisions", keyword)
+        if document_type == "features":
+            return self.matches(data, "features", keyword)
+        raise ValueError("keyword reader only supports decisions and features")
 
-    def latest_features(self, data: JsonObject, limit: int = 5) -> list[JsonObject]:
-        return self._latest(data, "features", "feature", limit)
+    def latest(self, document_type: str, data: JsonObject, num: int) -> list[JsonObject]:
+        if document_type == "decisions":
+            return self.latest_records(data, "decisions", "decision", num)
+        if document_type == "features":
+            return self.latest_records(data, "features", "feature", num)
+        raise ValueError("date reader only supports decisions and features")
 
 
 class FileStore:
-    """UTF-8 file input and output."""
+    """统一使用 UTF-8 读写文件。"""
 
     @staticmethod
     def read_text(path: Path) -> str:
@@ -610,136 +599,199 @@ class FileStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 
-
-class ConversionService:
-    """Application service for conversion and index operations."""
-
-    def __init__(self, registry: DocumentRegistry, index_service: IndexService) -> None:
-        self.registry = registry
-        self.index_service = index_service
-
-    def json_to_markdown(self, document_type: str, data: JsonObject) -> str:
-        return self.registry.get(document_type).format(data)
-
-    def markdown_to_json(self, document_type: str, markdown: str) -> JsonObject:
-        return self.registry.get(document_type).parse(markdown)
-
-    def search(self, document_type: str, data: JsonObject, keyword: str) -> list[JsonObject]:
-        return self.index_service.search(document_type, data, keyword)
-
-    def latest(self, document_type: str, data: JsonObject, limit: int) -> list[JsonObject]:
-        if document_type == "decisions":
-            return self.index_service.latest_decisions(data, limit)
-        if document_type == "features":
-            return self.index_service.latest_features(data, limit)
-        raise ValueError("latest is only supported for decisions and features")
+    @staticmethod
+    def write_json(path: Path, data: Any) -> None:
+        FileStore.write_text(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 
 
-class CliApplication:
-    """Command-line adapter for the conversion service."""
+class harness_context:
+    """Harness 上下文的唯一公开操作类。
 
-    def __init__(self, service: ConversionService) -> None:
-        self.service = service
+    ``input_path`` 是 Editor 的输入 JSON，或 Reader 的输入 Markdown/JSON。
+    ``output_path`` 是 Editor 生成的 Markdown，或 Reader 生成的 JSON。
+    """
 
-    def build_parser(self) -> argparse.ArgumentParser:
-        parser = argparse.ArgumentParser(description="Harness context converter")
-        parser.add_argument("--type", choices=self.service.registry.choices(), required=True)
-        parser.add_argument(
-            "--direction",
-            choices=("json-to-md", "md-to-json", "search", "latest"),
-            required=True,
-        )
-        parser.add_argument("--keyword", help="search keyword, used with --direction search")
-        parser.add_argument("--limit", type=int, default=5, help="result limit for latest")
-        parser.add_argument("--input", type=Path, required=True)
-        parser.add_argument("--output", type=Path, required=True)
-        return parser
+    def __init__(self, input_path: str | Path, output_path: str | Path) -> None:
+        self.input_path = Path(input_path)
+        self.output_path = Path(output_path)
+        self.handlers: dict[str, DocumentHandler] = {
+            "architecture": ArchitectureHandler(),
+            "progress": ProgressHandler(),
+            "decisions": DecisionsHandler(),
+            "features": FeaturesHandler(),
+        }
+        self.index_service = IndexService()
 
-    def run(self, argv: Sequence[str] | None = None) -> None:
-        args = self.build_parser().parse_args(argv)
-        if args.direction == "json-to-md":
-            result = self.service.json_to_markdown(args.type, FileStore.read_json(args.input))
-            FileStore.write_text(args.output, result)
-            return
-        if args.direction == "md-to-json":
-            data = self.service.markdown_to_json(args.type, FileStore.read_text(args.input))
-            FileStore.write_text(args.output, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-            return
+    def select_handler(self, document_type: str) -> DocumentHandler:
+        return self.handlers[document_type]
 
-        data = (
-            FileStore.read_json(args.input)
-            if args.input.suffix.lower() == ".json"
-            else self.service.markdown_to_json(args.type, FileStore.read_text(args.input))
-        )
-        if args.direction == "search":
-            if not args.keyword:
-                raise ValueError("--direction search requires --keyword")
-            matches = self.service.search(args.type, data, args.keyword)
-        else:
-            matches = self.service.latest(args.type, data, args.limit)
-        FileStore.write_text(args.output, json.dumps(matches, ensure_ascii=False, indent=2) + "\n")
+    def edit_document(self, document_type: str) -> Path:
+        """读取 JSON，生成对应的固定格式 Markdown。"""
+        data = FileStore.read_json(self.input_path)
+        markdown = self.select_handler(document_type).format(data)
+        FileStore.write_text(self.output_path, markdown)
+        return self.output_path
 
+    def read_all(self, document_type: str) -> JsonObject:
+        """读取 Markdown 或 JSON，输出完整 JSON。"""
+        data = self.read_data(document_type)
+        FileStore.write_json(self.output_path, data)
+        return data
 
-def create_application() -> CliApplication:
-    registry = DocumentRegistry(
-        [
-            ArchitectureHandler(),
-            ProgressHandler(),
-            DecisionsHandler(),
-            FeaturesHandler(),
-        ]
-    )
-    return CliApplication(ConversionService(registry, IndexService()))
+    def read_by_date(self, document_type: str, num: int) -> list[JsonObject]:
+        """按日期降序读取最新 num 条记录。"""
+        data = self.read_data(document_type)
+        records = self.index_service.latest(document_type, data, num)
+        FileStore.write_json(self.output_path, records)
+        return records
 
+    def read_by_keyword(self, document_type: str, keyword: str) -> list[JsonObject]:
+        """按 keywords 数组查询记录。"""
+        data = self.read_data(document_type)
+        records = self.index_service.search(document_type, data, keyword)
+        FileStore.write_json(self.output_path, records)
+        return records
 
-# Backward-compatible function API.
-def format_architecture(data: JsonObject) -> str:
-    return ArchitectureHandler().format(data)
+    def read_data(self, document_type: str) -> JsonObject:
+        if self.input_path.suffix.casefold() == ".json":
+            return FileStore.read_json(self.input_path)
+        return self.select_handler(document_type).parse(FileStore.read_text(self.input_path))
 
+    # ARCHITECTURE.md
 
-def parse_architecture(markdown: str) -> JsonObject:
-    return ArchitectureHandler().parse(markdown)
+    def Architecture_Editor(self) -> Path:
+        return self.edit_document("architecture")
 
+    def Architecture_Reader(self) -> JsonObject:
+        return self.read_all("architecture")
 
-def format_progress(data: JsonObject) -> str:
-    return ProgressHandler().format(data)
+    # PROGRESS.md
 
+    def Progress_Editor(self) -> Path:
+        return self.edit_document("progress")
 
-def parse_progress(markdown: str) -> JsonObject:
-    return ProgressHandler().parse(markdown)
+    def Progress_Reader(self) -> JsonObject:
+        return self.read_all("progress")
 
+    # DECISIONS.md
 
-def format_decisions(data: JsonObject) -> str:
-    return DecisionsHandler().format(data)
+    def Decisions_Editor(self) -> Path:
+        return self.edit_document("decisions")
 
+    def Decisions_Reader(self) -> JsonObject:
+        return self.read_all("decisions")
 
-def parse_decisions(markdown: str) -> JsonObject:
-    return DecisionsHandler().parse(markdown)
+    def Decisions_Reader_by_date(self, num: int) -> list[JsonObject]:
+        return self.read_by_date("decisions", num)
 
+    def Decisions_Reader_by_keyword(self, keyword: str) -> list[JsonObject]:
+        return self.read_by_keyword("decisions", keyword)
 
-def format_features(data: JsonObject) -> str:
-    return FeaturesHandler().format(data)
+    # FEATURES.md
 
+    def Features_Editor(self) -> Path:
+        return self.edit_document("features")
 
-def parse_features(markdown: str) -> JsonObject:
-    return FeaturesHandler().parse(markdown)
+    def Features_Reader(self) -> JsonObject:
+        return self.read_all("features")
 
+    def Features_Reader_by_date(self, num: int) -> list[JsonObject]:
+        """每次读取日期最新的 num 条功能记录。"""
+        return self.read_by_date("features", num)
 
-def search_decisions(data: JsonObject, keyword: str) -> list[JsonObject]:
-    return IndexService().search("decisions", data, keyword)
-
-
-def search_features(data: JsonObject, keyword: str) -> list[JsonObject]:
-    return IndexService().search("features", data, keyword)
-
-
-def latest_decisions(data: JsonObject, limit: int = 5) -> list[JsonObject]:
-    return IndexService().latest_decisions(data, limit)
+    def Features_Reader_by_keyword(self, keyword: str) -> list[JsonObject]:
+        return self.read_by_keyword("features", keyword)
 
 
-def latest_features(data: JsonObject, limit: int = 5) -> list[JsonObject]:
-    return IndexService().latest_features(data, limit)
+OPERATIONS = (
+    "Architecture_Editor",
+    "Architecture_Reader",
+    "Progress_Editor",
+    "Progress_Reader",
+    "Decisions_Editor",
+    "Decisions_Reader",
+    "Decisions_Reader_by_date",
+    "Decisions_Reader_by_keyword",
+    "Features_Editor",
+    "Features_Reader",
+    "Features_Reader_by_date",
+    "Features_Reader_by_keyword",
+)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Harness context editor and reader")
+    parser.add_argument("--operation", choices=OPERATIONS)
+    parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--num", "--limit", dest="num", type=int, default=5)
+    parser.add_argument("--keyword")
+
+    # 兼容旧版参数；新调用应优先使用 --operation。
+    parser.add_argument("--type", choices=("architecture", "progress", "decisions", "features"))
+    parser.add_argument("--direction", choices=("json-to-md", "md-to-json", "search", "latest"))
+    return parser
+
+
+def resolve_operation(args: argparse.Namespace, parser: argparse.ArgumentParser) -> str:
+    if args.operation:
+        return args.operation
+    if not args.type or not args.direction:
+        parser.error("需要 --operation，或同时提供旧版 --type 和 --direction")
+
+    prefix = args.type.capitalize()
+    mapping = {
+        "json-to-md": f"{prefix}_Editor",
+        "md-to-json": f"{prefix}_Reader",
+        "search": f"{prefix}_Reader_by_keyword",
+        "latest": f"{prefix}_Reader_by_date",
+    }
+    operation = mapping[args.direction]
+    if operation not in OPERATIONS:
+        parser.error(f"{args.direction} 不支持 {args.type}")
+    return operation
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    operation = resolve_operation(args, parser)
+    context = harness_context(args.input, args.output)
+
+    if operation == "Architecture_Editor":
+        context.Architecture_Editor()
+    elif operation == "Architecture_Reader":
+        context.Architecture_Reader()
+    elif operation == "Progress_Editor":
+        context.Progress_Editor()
+    elif operation == "Progress_Reader":
+        context.Progress_Reader()
+    elif operation == "Decisions_Editor":
+        context.Decisions_Editor()
+    elif operation == "Decisions_Reader":
+        context.Decisions_Reader()
+    elif operation == "Decisions_Reader_by_date":
+        context.Decisions_Reader_by_date(args.num)
+    elif operation == "Decisions_Reader_by_keyword":
+        if not args.keyword:
+            parser.error("Decisions_Reader_by_keyword 需要 --keyword")
+        context.Decisions_Reader_by_keyword(args.keyword)
+    elif operation == "Features_Editor":
+        context.Features_Editor()
+    elif operation == "Features_Reader":
+        context.Features_Reader()
+    elif operation == "Features_Reader_by_date":
+        context.Features_Reader_by_date(args.num)
+    elif operation == "Features_Reader_by_keyword":
+        if not args.keyword:
+            parser.error("Features_Reader_by_keyword 需要 --keyword")
+        context.Features_Reader_by_keyword(args.keyword)
+    else:
+        parser.error(f"unsupported operation: {operation}")
+
+    print(args.output)
+    return 0
 
 
 if __name__ == "__main__":
-    create_application().run()
+    raise SystemExit(main())
