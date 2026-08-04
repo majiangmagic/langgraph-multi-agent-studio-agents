@@ -37,7 +37,7 @@ class HarnessInitializerGraph:
 
 
 def route_after_environment_check(state: HarnessInitializerState) -> str:
-    """Send fresh projects through the bootstrap steps and skip others."""
+    """Send fresh projects through initialization and existing ones to planning."""
 
     return "markdown_creator" if state.get("should_initialize") else "finish"
 
