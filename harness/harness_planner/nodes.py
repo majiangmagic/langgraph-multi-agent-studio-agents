@@ -16,7 +16,8 @@ from app.agents.harness.harness_planner.state import HarnessPlannerState
 
 
 logger = logging.getLogger(__name__)
-PLANNED_DOCUMENTS = ("PROGRESS.md", "FEATURES.md", "DECISIONS.md")
+PLANNED_DOCUMENTS = ("AGENT.md", "FEATURES.md", "PROGRESS.md", "DECISIONS.md")
+READ_ONLY_DOCUMENTS = ("PLANER.md",)
 MAX_CODEX_ATTEMPTS = 2
 GARBLED_PATTERNS = ("\ufffd", "???")
 
@@ -48,6 +49,7 @@ class HarnessPlannerNode:
             raise NotADirectoryError(f"Target path is not a directory: {target_directory}")
 
         before_snapshots = collect_document_snapshots(target_directory)
+        before_project_files = snapshot_project_files(target_directory)
         attempts: List[Dict[str, Any]] = []
         last_stderr = ""
 
@@ -55,8 +57,12 @@ class HarnessPlannerNode:
         for attempt_index in range(1, MAX_CODEX_ATTEMPTS + 1):
             result = run_codex_cli(target_directory, prompt)
             after_snapshots = collect_document_snapshots(target_directory)
+            after_project_files = snapshot_project_files(target_directory)
             missing_updates = find_missing_updates(before_snapshots, after_snapshots)
             garbled_documents = find_garbled_documents(after_snapshots)
+            forbidden_changes = find_forbidden_changes(
+                before_project_files, after_project_files
+            )
 
             attempts.append(
                 {
@@ -64,13 +70,19 @@ class HarnessPlannerNode:
                     "exit_code": result.returncode,
                     "missing_updates": missing_updates,
                     "garbled_documents": garbled_documents,
+                    "forbidden_changes": forbidden_changes,
                     "stdout": result.stdout[-8000:],
                     "stderr": result.stderr[-8000:],
                 }
             )
             last_stderr = result.stderr
 
-            if result.returncode == 0 and not missing_updates and not garbled_documents:
+            if (
+                result.returncode == 0
+                and not missing_updates
+                and not garbled_documents
+                and not forbidden_changes
+            ):
                 return {
                     "status": "complete",
                     "results": {
@@ -84,24 +96,30 @@ class HarnessPlannerNode:
                     "error": None,
                 }
 
-            prompt = build_retry_prompt(missing_updates, garbled_documents)
+            prompt = build_retry_prompt(missing_updates, garbled_documents, forbidden_changes)
 
         final_after_snapshots = collect_document_snapshots(target_directory)
         final_missing_updates = find_missing_updates(before_snapshots, final_after_snapshots)
         final_garbled_documents = find_garbled_documents(final_after_snapshots)
+        final_project_files = snapshot_project_files(target_directory)
+        final_forbidden_changes = find_forbidden_changes(
+            before_project_files, final_project_files
+        )
         logger.warning(
-            "Harness planner ended with unresolved documents: missing=%s garbled=%s",
+            "Harness planner ended with unresolved documents: missing=%s garbled=%s forbidden=%s",
             final_missing_updates,
             final_garbled_documents,
+            final_forbidden_changes,
         )
         return {
             "status": "error",
-            "error": summarize_failures(final_missing_updates, final_garbled_documents, last_stderr),
+            "error": summarize_failures(final_missing_updates, final_garbled_documents, final_forbidden_changes, last_stderr),
             "results": {
                 "target_directory": str(target_directory),
                 "template_directory": str(template_directory),
                 "before_snapshots": snapshots_to_json(before_snapshots),
                 "after_snapshots": snapshots_to_json(final_after_snapshots),
+                "forbidden_changes": final_forbidden_changes,
                 "attempts": attempts,
                 "codex_status": "failed",
             },
@@ -121,17 +139,22 @@ def build_codex_prompt(target_directory: Path, template_directory: Path, snapsho
             f"Work inside: {target_directory}",
             f"Harness templates: {template_directory}",
             "Read PLANER.md in the current project before making any changes.",
-            "Update PROGRESS.md, FEATURES.md, and DECISIONS.md when needed.",
-            "Keep all files in clean UTF-8 and avoid garbled text.",
+            "Update only AGENT.md, FEATURES.md, PROGRESS.md, and DECISIONS.md.",
+            "Read PLANER.md, but never modify PLANER.md or any other file.",
+            "Keep all four allowed files in clean UTF-8 and avoid garbled text.",
             "If a tracked file truly does not need a change, explain why in the final response.",
             "Tracked document status before the run:",
             *planned_status,
-            "Focus only on the three tracked docs unless the plan explicitly requires something else.",
+            "Any change outside the four allowed files is a failure and must be corrected.",
         ]
     )
 
 
-def build_retry_prompt(missing_updates: List[str], garbled_documents: List[str]) -> str:
+def build_retry_prompt(
+    missing_updates: List[str],
+    garbled_documents: List[str],
+    forbidden_changes: List[str],
+) -> str:
     """Build a stricter follow-up prompt after an incomplete Codex run."""
 
     lines = [
@@ -142,10 +165,13 @@ def build_retry_prompt(missing_updates: List[str], garbled_documents: List[str])
         lines.append(f"Files that did not change: {', '.join(missing_updates)}")
     if garbled_documents:
         lines.append(f"Files with garbled text: {', '.join(garbled_documents)}")
+    if forbidden_changes:
+        lines.append(f"Files that must not have been changed: {', '.join(forbidden_changes)}")
     lines.extend(
         [
             "Do not leave the issue unresolved.",
             "If a file still needs no change, state the reason clearly in the final response.",
+            "Revert every forbidden change, then update only the four allowed files.",
             "Prefer minimal, maintainable edits.",
         ]
     )
@@ -172,6 +198,35 @@ def run_codex_cli(target_directory: Path, prompt: str) -> subprocess.CompletedPr
         text=True,
         check=False,
     )
+
+
+def snapshot_project_files(target_directory: Path) -> Dict[str, str]:
+    """Hash project files so the planner can enforce its write boundary."""
+
+    snapshots: Dict[str, str] = {}
+    for path in target_directory.rglob("*"):
+        if not path.is_file() or ".git" in path.parts or "__pycache__" in path.parts:
+            continue
+        relative_path = path.relative_to(target_directory).as_posix()
+        try:
+            snapshots[relative_path] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            continue
+    return snapshots
+
+
+def find_forbidden_changes(
+    before_files: Dict[str, str], after_files: Dict[str, str]
+) -> List[str]:
+    """Return files changed outside the planner's four allowed documents."""
+
+    allowed_files = set(PLANNED_DOCUMENTS)
+    changed_files = {
+        filename
+        for filename in set(before_files) | set(after_files)
+        if before_files.get(filename) != after_files.get(filename)
+    }
+    return sorted(changed_files - allowed_files)
 
 
 def collect_document_snapshots(target_directory: Path) -> Dict[str, DocumentSnapshot]:
@@ -256,7 +311,12 @@ def snapshots_to_json(snapshots: Dict[str, DocumentSnapshot]) -> Dict[str, Dict[
     }
 
 
-def summarize_failures(missing_updates: List[str], garbled_documents: List[str], last_error: str) -> str:
+def summarize_failures(
+    missing_updates: List[str],
+    garbled_documents: List[str],
+    forbidden_changes: List[str],
+    last_error: str,
+) -> str:
     """Produce a concise human-readable failure message."""
 
     parts: List[str] = []
@@ -264,6 +324,8 @@ def summarize_failures(missing_updates: List[str], garbled_documents: List[str],
         parts.append(f"Missing updates: {', '.join(missing_updates)}")
     if garbled_documents:
         parts.append(f"Garbled documents: {', '.join(garbled_documents)}")
+    if forbidden_changes:
+        parts.append(f"Forbidden changes: {', '.join(forbidden_changes)}")
     cleaned_error = last_error.strip()
     if cleaned_error:
         parts.append(f"Codex stderr: {cleaned_error[:1200]}")
