@@ -1,0 +1,6 @@
+{
+  "name": "harness_worker",
+  "display_name": "Harness Worker",
+  "description": "Read PROGRESS.md and run Codex CLI to implement the current planned work.",
+  "config": {}
+}
