@@ -1,0 +1,6 @@
+{
+  "name": "harness_checker",
+  "display_name": "Harness Checker",
+  "description": "Check all Markdown files for garbled text, validate the completed feature, and create a local Git checkpoint.",
+  "config": {}
+}

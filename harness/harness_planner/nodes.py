@@ -58,7 +58,12 @@ class HarnessPlannerNode:
         attempts: List[Dict[str, Any]] = []
         last_stderr = ""
 
-        prompt = build_codex_prompt(target_directory, template_directory, before_snapshots)
+        prompt = build_codex_prompt(
+            target_directory,
+            template_directory,
+            before_snapshots,
+            state.get("checker_results") or {},
+        )
         for attempt_index in range(1, MAX_CODEX_ATTEMPTS + 1):
             result = run_codex_cli(target_directory, prompt)
             after_snapshots = collect_document_snapshots(target_directory)
@@ -150,13 +155,28 @@ class HarnessPlannerNode:
         }
 
 
-def build_codex_prompt(target_directory: Path, template_directory: Path, snapshots: Dict[str, DocumentSnapshot]) -> str:
+def build_codex_prompt(
+    target_directory: Path,
+    template_directory: Path,
+    snapshots: Dict[str, DocumentSnapshot],
+    checker_results: Dict[str, Any],
+) -> str:
     """Build the initial Codex prompt for the planner stage."""
 
     planned_status = [
         f"- {name}: {'exists' if snapshot.exists else 'missing'}"
         for name, snapshot in snapshots.items()
     ]
+    checker_report = str(checker_results.get("remake_report") or "").strip()
+    checker_context = (
+        [
+            "The previous harness_checker rejected the implementation and requested remake.",
+            f"Checker report: {checker_report}",
+            "Turn this report into a concrete repair plan in PROGRESS.md for harness_worker.",
+        ]
+        if checker_report
+        else []
+    )
     return "\n".join(
         [
             "You are harness_planner.",
@@ -170,6 +190,7 @@ def build_codex_prompt(target_directory: Path, template_directory: Path, snapsho
             "DECISIONS.md, AGENT.md, and ARCHITECTURE.md may remain unchanged only when no new decision, project information, or architecture change applies, with an explicit reason.",
             "Keep all tracked documents in clean UTF-8 and avoid garbled text.",
             "For every unchanged optional document, include exactly one final response line: HARNESS_DOCUMENT_DECISION: <filename>=unchanged; reason=<具体原因>",
+            *checker_context,
             "Tracked document status before the run:",
             *planned_status,
             "Any change outside the five allowed files is a failure and must be corrected.",

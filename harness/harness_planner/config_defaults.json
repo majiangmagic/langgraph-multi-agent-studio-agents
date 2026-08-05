@@ -1,6 +1,6 @@
 {
   "name": "harness_planner",
   "display_name": "Harness Planner",
-  "description": "Run Codex against PLANER.md and enforce updates to PROGRESS.md, FEATURES.md, and DECISIONS.md for existing projects.",
+  "description": "Run Codex against PLANER.md, maintain planning documents, and turn checker remake reports into the next repair plan.",
   "config": {}
 }

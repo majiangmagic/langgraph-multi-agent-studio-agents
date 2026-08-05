@@ -1,12 +1,12 @@
-"""State schema for the harness planner agent."""
+"""State schema for the Harness checker agent."""
 
 from typing import Any, Dict, List, Optional, TypedDict
 
 from langchain_core.messages import BaseMessage
 
 
-class HarnessPlannerState(TypedDict, total=False):
-    """Runtime state for planning updates in an existing project."""
+class HarnessCheckerState(TypedDict, total=False):
+    """Runtime state for validating and archiving completed Harness work."""
 
     agent_id: str
     agent_name: str
@@ -20,8 +20,9 @@ class HarnessPlannerState(TypedDict, total=False):
     workflow_inputs: Dict[str, Any]
     request_context: Dict[str, Any]
     target_directory: Optional[str]
-    harness_template_directory: Optional[str]
-    checker_results: Dict[str, Any]
+    markdown_issues: List[Dict[str, str]]
+    validation: Dict[str, Any]
+    remake_count: int
     status: Optional[str]
     results: Optional[Dict[str, Any]]
     error: Optional[str]
