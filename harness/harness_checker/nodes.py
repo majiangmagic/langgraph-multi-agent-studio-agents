@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -11,15 +12,6 @@ from typing import Any, Dict, List
 from app.agents.harness.harness_checker.state import HarnessCheckerState
 from app.agents.harness.harness_initializer.nodes import resolve_target_directory
 
-GARBLED_PATTERNS = (
-    "\ufffd",
-    "???",
-    "\u951b",
-    "\u9286",
-    "\u9225",
-    "\u9428\u52ec",
-    "\u93c2\u56e6\u6b22",
-)
 CHECK_RESULT_PATTERN = re.compile(
     r"HARNESS_CHECK_RESULT:\s*(passed|remake)",
     re.IGNORECASE,
@@ -100,21 +92,46 @@ class FunctionalityCheckerNode:
 
 
 class OtherCheckNode:
-    """Check every Markdown file under the project for garbled text."""
+    """Run the project's Harness check.py other_check operation."""
 
     def __call__(self, state: HarnessCheckerState) -> Dict[str, Any]:
         target_directory = resolve_target_directory(state)
-        issues = check_all_markdown_files(target_directory)
-        if issues:
-            report = "Markdown garble check failed: " + "; ".join(
-                f"{issue['path']}: {issue['reason']}" for issue in issues[:20]
-            )
+        script_path = target_directory / "harness" / "check.py"
+        if not script_path.is_file():
             return build_remake_result(
                 state,
                 target_directory,
-                report,
+                "harness/check.py does not exist; Markdown validation cannot run.",
                 "other_check",
-                markdown_issues=issues,
+            )
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(script_path),
+                str(target_directory),
+                "--operation",
+                "other_check",
+            ],
+            cwd=target_directory,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        report = (result.stdout or result.stderr).strip()
+        markdown_files_checked = sum(
+            1
+            for path in target_directory.rglob("*.md")
+            if path.is_file() and ".git" not in path.parts
+        )
+        if result.returncode != 0:
+            return build_remake_result(
+                state,
+                target_directory,
+                report or "harness/check.py other_check failed.",
+                "other_check",
             )
 
         return {
@@ -124,11 +141,12 @@ class OtherCheckNode:
             "results": {
                 **(state.get("results") or {}),
                 "target_directory": str(target_directory),
-                "markdown_files_checked": count_markdown_files(target_directory),
+                "markdown_files_checked": markdown_files_checked,
                 "markdown_issues": [],
                 "remake_required": False,
                 "remake_report": "",
                 "check_phase": "other_check",
+                "other_check_output": report,
             },
         }
 
@@ -181,44 +199,6 @@ class GitCheckpointCreatorNode:
             },
         }
 
-
-def check_all_markdown_files(target_directory: Path) -> List[Dict[str, str]]:
-    """Return encoding or garble issues found in every project Markdown file."""
-
-    if not target_directory.exists() or not target_directory.is_dir():
-        return [{"path": str(target_directory), "reason": "project directory does not exist"}]
-
-    issues: List[Dict[str, str]] = []
-    for path in iter_markdown_files(target_directory):
-        relative_path = path.relative_to(target_directory).as_posix()
-        try:
-            text = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            issues.append({"path": relative_path, "reason": "not valid UTF-8"})
-            continue
-        matched_pattern = next((pattern for pattern in GARBLED_PATTERNS if pattern in text), None)
-        if matched_pattern is not None:
-            issues.append(
-                {
-                    "path": relative_path,
-                    "reason": f"contains garbled text pattern {matched_pattern!r}",
-                }
-            )
-    return issues
-
-
-def iter_markdown_files(target_directory: Path):
-    """Yield Markdown files while excluding Git internals."""
-
-    for path in target_directory.rglob("*.md"):
-        if path.is_file() and ".git" not in path.parts:
-            yield path
-
-
-def count_markdown_files(target_directory: Path) -> int:
-    """Count Markdown files included in other_check."""
-
-    return sum(1 for _ in iter_markdown_files(target_directory))
 
 
 def build_checker_prompt() -> str:

@@ -9,6 +9,15 @@ from typing import Sequence
 
 
 TARGET_FILENAMES = ("PROGRESS.md", "DECISIONS.md", "FEATURES.md", "ARCHITECTURE.md")
+GARBLED_PATTERNS = (
+    "\ufffd",
+    "???",
+    "\u951b",
+    "\u9286",
+    "\u9225",
+    "\u9428\u52ec",
+    "\u93c2\u56e6\u6b22",
+)
 
 
 @dataclass(frozen=True)
@@ -143,8 +152,38 @@ class harness_check:
             issues.extend(self.Garble_Check(document))
         return issues
 
+    def Other_Check(self) -> list[CheckIssue]:
+        """????????? Markdown ?????????"""
+        if not self.root_dir.exists() or not self.root_dir.is_dir():
+            raise NotADirectoryError(f"?????: {self.root_dir}")
+
+        issues: list[CheckIssue] = []
+        markdown_files = sorted(
+            (
+                path
+                for path in self.root_dir.rglob("*.md")
+                if path.is_file() and ".git" not in path.parts
+            ),
+            key=lambda path: str(path).casefold(),
+        )
+        for path in markdown_files:
+            try:
+                content = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                issues.append(CheckIssue(path, "??????? UTF-8 ??"))
+                continue
+
+            matched_pattern = next(
+                (pattern for pattern in GARBLED_PATTERNS if pattern in content),
+                None,
+            )
+            if matched_pattern is not None:
+                issues.append(CheckIssue(path, f"??????? {matched_pattern!r}"))
+
+        return issues
+
     def All_Check(self) -> list[CheckIssue]:
-        """依次执行四类 Harness 文档检查。"""
+        """?????? Harness ?????"""
         issues: list[CheckIssue] = []
         issues.extend(self.Progress_Check())
         issues.extend(self.Decisions_Check())
@@ -153,12 +192,14 @@ class harness_check:
         return issues
 
 
+
 OPERATIONS = (
     "Progress_Check",
     "Decisions_Check",
     "Features_Check",
     "Architecture_Check",
     "All_Check",
+    "other_check",
 )
 
 
@@ -201,6 +242,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             issues = context.Architecture_Check()
         elif args.operation == "All_Check":
             issues = context.All_Check()
+        elif args.operation == "other_check":
+            issues = context.Other_Check()
         else:
             parser.error(f"不支持的检查: {args.operation}")
     except NotADirectoryError as error:
