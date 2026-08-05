@@ -17,9 +17,9 @@ from app.agents.harness.harness_planner.state import HarnessPlannerState
 
 
 logger = logging.getLogger(__name__)
-TRACKED_DOCUMENTS = ("AGENT.md", "FEATURES.md", "PROGRESS.md", "DECISIONS.md")
+TRACKED_DOCUMENTS = ("AGENT.md", "FEATURES.md", "PROGRESS.md", "DECISIONS.md", "ARCHITECTURE.md")
 REQUIRED_UPDATE_DOCUMENTS = ("PROGRESS.md",)
-OPTIONAL_DOCUMENTS = ("AGENT.md", "FEATURES.md", "DECISIONS.md")
+OPTIONAL_DOCUMENTS = ("AGENT.md", "FEATURES.md", "DECISIONS.md", "ARCHITECTURE.md")
 READ_ONLY_DOCUMENTS = ("PLANER.md",)
 MAX_CODEX_ATTEMPTS = 2
 GARBLED_PATTERNS = ("\ufffd", "???")
@@ -163,16 +163,16 @@ def build_codex_prompt(target_directory: Path, template_directory: Path, snapsho
             f"Work inside: {target_directory}",
             f"Harness templates: {template_directory}",
             "Read PLANER.md in the current project before making any changes.",
-            "Update only AGENT.md, FEATURES.md, PROGRESS.md, and DECISIONS.md.",
-            "Read PLANER.md, but never modify PLANER.md or any other file.",
+            "Update only AGENT.md, FEATURES.md, PROGRESS.md, DECISIONS.md, and ARCHITECTURE.md.",
+            "Read PLANER.md, but never modify PLANER.md or any file outside the five allowed documents.",
             "PROGRESS.md must be updated in this planning pass.",
             "FEATURES.md must be updated when there is a new feature or feature status change; otherwise it may remain unchanged only with an explicit reason.",
-            "DECISIONS.md and AGENT.md may remain unchanged only when no new decision or project information applies, with an explicit reason.",
+            "DECISIONS.md, AGENT.md, and ARCHITECTURE.md may remain unchanged only when no new decision, project information, or architecture change applies, with an explicit reason.",
             "Keep all tracked documents in clean UTF-8 and avoid garbled text.",
             "For every unchanged optional document, include exactly one final response line: HARNESS_DOCUMENT_DECISION: <filename>=unchanged; reason=<具体原因>",
             "Tracked document status before the run:",
             *planned_status,
-            "Any change outside the four allowed files is a failure and must be corrected.",
+            "Any change outside the five allowed files is a failure and must be corrected.",
         ]
     )
 
@@ -204,7 +204,7 @@ def build_retry_prompt(
         [
             "Do not leave the issue unresolved.",
             "If an optional document truly needs no change, leave it unchanged and provide the required HARNESS_DOCUMENT_DECISION line with a concrete reason.",
-            "Revert every forbidden change, then update only the four allowed files.",
+            "Revert every forbidden change, then update only the five allowed files.",
             "Prefer minimal, maintainable edits.",
         ]
     )
@@ -251,7 +251,7 @@ def snapshot_project_files(target_directory: Path) -> Dict[str, str]:
 def find_forbidden_changes(
     before_files: Dict[str, str], after_files: Dict[str, str]
 ) -> List[str]:
-    """Return files changed outside the planner's four allowed documents."""
+    """Return files changed outside the planner's five allowed documents."""
 
     allowed_files = set(TRACKED_DOCUMENTS)
     changed_files = {
@@ -306,7 +306,7 @@ def contains_garble(text: str) -> bool:
 
 
 DOCUMENT_DECISION_PATTERN = re.compile(
-    r"HARNESS_DOCUMENT_DECISION:\s*(AGENT\.md|FEATURES\.md|DECISIONS\.md)\s*=\s*unchanged\s*;\s*reason\s*=\s*(.+)",
+    r"HARNESS_DOCUMENT_DECISION:\s*(AGENT\.md|FEATURES\.md|DECISIONS\.md|ARCHITECTURE\.md)\s*=\s*unchanged\s*;\s*reason\s*=\s*(.+)",
     re.IGNORECASE,
 )
 
