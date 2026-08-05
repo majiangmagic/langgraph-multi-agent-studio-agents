@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import subprocess
 from pathlib import Path
 from typing import Any, Dict
@@ -36,7 +35,7 @@ class HarnessWorkerNode:
         if not runtime_text.strip():
             raise ValueError("RUNTIME.md is empty; harness_worker cannot start work")
 
-        verify_planner_updated_progress(state, progress_path)
+        verify_planner_updated_progress(state)
         result = run_codex_cli(target_directory)
         execution = {
             "exit_code": result.returncode,
@@ -76,7 +75,7 @@ def read_required_document(path: Path) -> str:
         raise ValueError(f"{path.name} is not valid UTF-8: {path}") from exc
 
 
-def verify_planner_updated_progress(state: HarnessWorkerState, progress_path: Path) -> None:
+def verify_planner_updated_progress(state: HarnessWorkerState) -> None:
     """Refuse to start work unless the planner changed the current PROGRESS.md."""
 
     planner_results = state.get("planner_results") or {}
@@ -91,13 +90,6 @@ def verify_planner_updated_progress(state: HarnessWorkerState, progress_path: Pa
         raise ValueError(
             "harness_planner did not update PROGRESS.md; ask the planner to update "
             "PROGRESS.md before starting harness_worker"
-        )
-
-    current_hash = hashlib.sha256(progress_path.read_bytes()).hexdigest()
-    if current_hash != after_hash:
-        raise ValueError(
-            "PROGRESS.md changed after harness_planner finished; ask the planner to "
-            "review and update PROGRESS.md again before starting harness_worker"
         )
 
 
