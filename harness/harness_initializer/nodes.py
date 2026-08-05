@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from langchain_core.runnables import RunnableConfig
+from langgraph.types import interrupt
 
 from app.agents.harness.harness_initializer.spec import SCRIPT_CREATED_DOCUMENTS, HARNESS_TEMPLATE_DIRECTORY, REQUIRED_DOCUMENTS
 from app.agents.harness.harness_initializer.state import HarnessInitializerState
@@ -33,6 +34,9 @@ class EnvironmentCheckerNode:
                 "target_directory": str(target_directory),
                 "harness_template_directory": str(template_directory),
                 "should_initialize": False,
+                "input_sufficient": True,
+                "clarification_request": None,
+                "clarification_answer": None,
                 "skip_reason": skip_reason,
                 "status": "complete",
                 "results": {
@@ -46,10 +50,40 @@ class EnvironmentCheckerNode:
                 "git_commit": None,
                 "harness_copied": False,
             }
+        clarification_answer = state.get("clarification_answer")
+        source_text = "\n".join(
+            value
+            for value in (state.get("user_input"), clarification_answer)
+            if value and str(value).strip()
+        )
+        input_sufficient, missing_information = assess_project_context(
+            source_text, state.get("workflow_inputs") or {}
+        )
+        while not input_sufficient:
+            question = build_context_question(missing_information)
+            clarification_answer = str(
+                interrupt({
+                    "kind": "workflow.clarification",
+                    "question": question,
+                    "options": [],
+                    "context": "\u9996\u6b21\u521d\u59cb\u5316\u9700\u8981\u9879\u76ee\u80cc\u666f\u3001\u6280\u672f\u6808\u548c\u5e38\u7528\u547d\u4ee4\uff0c\u56de\u7b54\u540e\u5c06\u7ee7\u7eed\u6267\u884c\u3002",
+                })
+                or ""
+            ).strip()
+            source_text = "\n".join(
+                value for value in (source_text, clarification_answer) if value
+            )
+            input_sufficient, missing_information = assess_project_context(
+                source_text, state.get("workflow_inputs") or {}
+            )
+
         return {
             "target_directory": str(target_directory),
             "harness_template_directory": str(template_directory),
             "should_initialize": True,
+            "input_sufficient": True,
+            "clarification_answer": clarification_answer,
+            "clarification_request": None,
             "skip_reason": None,
             "status": "working",
             "results": {
@@ -117,6 +151,49 @@ class GitRepoCreatorNode:
                 "initialization_phase": "git_repo_creator_placeholder",
             },
         }
+
+
+
+def assess_project_context(text: str, workflow_inputs: Dict[str, Any]) -> tuple[bool, List[str]]:
+    """Check whether a fresh project request contains minimum bootstrap context."""
+
+    context = workflow_inputs.get("project_context")
+    if isinstance(context, dict):
+        combined = "\n".join(str(value) for value in context.values() if value)
+    else:
+        combined = ""
+    content = f"{text}\n{combined}".lower()
+    categories = {
+        "\u9879\u76ee\u80cc\u666f": (
+            "\u9879\u76ee", "\u7528\u9014", "\u76ee\u6807", "\u80cc\u666f",
+            "\u5f00\u53d1", "\u5b9e\u73b0", "project", "purpose", "goal",
+        ),
+        "\u6280\u672f\u6808": (
+            "python", "javascript", "typescript", "java", "go", "rust",
+            "react", "vue", "fastapi", "\u6280\u672f\u6808", "\u6846\u67b6",
+            "\u6570\u636e\u5e93", "stack", "framework",
+        ),
+        "\u5e38\u7528\u6307\u4ee4": (
+            "\u547d\u4ee4", "\u6307\u4ee4", "\u542f\u52a8", "\u8fd0\u884c", "\u6d4b\u8bd5",
+            "\u5b89\u88c5", "\u90e8\u7f72", "npm", "pnpm", "pip", "uv", "pytest",
+            "docker", "command", "run", "test",
+        ),
+    }
+    missing = [
+        name for name, keywords in categories.items()
+        if not any(keyword in content for keyword in keywords)
+    ]
+    return not missing, missing
+
+
+def build_context_question(missing_information: List[str]) -> str:
+    """Build a direct clarification request for the missing bootstrap context."""
+
+    missing_text = "\u3001".join(missing_information) or "\u9879\u76ee\u57fa\u7840\u4fe1\u606f"
+    return (
+        f"\u8fd9\u662f\u4e00\u4e2a\u65b0\u9879\u76ee\uff0c\u521d\u59cb\u5316\u524d\u8fd8\u7f3a\u5c11\uff1a{missing_text}\u3002"
+        "\u8bf7\u8865\u5145\u9879\u76ee\u80cc\u666f\u3001\u6280\u672f\u6808\u548c\u5e38\u7528\u542f\u52a8\u6216\u6d4b\u8bd5\u547d\u4ee4\u4e2d\u7f3a\u5c11\u7684\u5185\u5bb9\u3002"
+    )
 
 
 def resolve_target_directory(state: HarnessInitializerState) -> Path:

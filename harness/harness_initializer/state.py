@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, TypedDict
 from langchain_core.messages import BaseMessage
 
 
-class HarnessInitializerState(TypedDict):
+class HarnessInitializerState(TypedDict, total=False):
     """Runtime state for bootstrapping a fresh project."""
 
     agent_id: str
@@ -22,6 +22,9 @@ class HarnessInitializerState(TypedDict):
     target_directory: Optional[str]
     harness_template_directory: Optional[str]
     should_initialize: bool
+    input_sufficient: bool
+    clarification_request: Optional[Dict[str, Any]]
+    clarification_answer: Optional[str]
     skip_reason: Optional[str]
     created_files: List[str]
     created_directories: List[str]
