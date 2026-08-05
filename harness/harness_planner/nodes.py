@@ -1,9 +1,10 @@
-"""Node handlers for the harness planner agent."""
+﻿"""Node handlers for the harness planner agent."""
 
 from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,7 +18,8 @@ from app.agents.harness.harness_planner.state import HarnessPlannerState
 
 logger = logging.getLogger(__name__)
 TRACKED_DOCUMENTS = ("AGENT.md", "FEATURES.md", "PROGRESS.md", "DECISIONS.md")
-REQUIRED_UPDATE_DOCUMENTS = ("FEATURES.md", "PROGRESS.md")
+REQUIRED_UPDATE_DOCUMENTS = ("PROGRESS.md",)
+OPTIONAL_DOCUMENTS = ("AGENT.md", "FEATURES.md", "DECISIONS.md")
 READ_ONLY_DOCUMENTS = ("PLANER.md",)
 MAX_CODEX_ATTEMPTS = 2
 GARBLED_PATTERNS = ("\ufffd", "???")
@@ -62,6 +64,11 @@ class HarnessPlannerNode:
             after_snapshots = collect_document_snapshots(target_directory)
             after_project_files = snapshot_project_files(target_directory)
             missing_updates = find_missing_updates(before_snapshots, after_snapshots)
+            unchanged_without_reason = find_unchanged_without_reason(
+                before_snapshots,
+                after_snapshots,
+                result.stdout,
+            )
             garbled_documents = find_garbled_documents(after_snapshots)
             forbidden_changes = find_forbidden_changes(
                 before_project_files, after_project_files
@@ -72,6 +79,7 @@ class HarnessPlannerNode:
                     "attempt": attempt_index,
                     "exit_code": result.returncode,
                     "missing_updates": missing_updates,
+                    "unchanged_without_reason": unchanged_without_reason,
                     "garbled_documents": garbled_documents,
                     "forbidden_changes": forbidden_changes,
                     "stdout": result.stdout[-8000:],
@@ -83,6 +91,7 @@ class HarnessPlannerNode:
             if (
                 result.returncode == 0
                 and not missing_updates
+                and not unchanged_without_reason
                 and not garbled_documents
                 and not forbidden_changes
             ):
@@ -99,24 +108,36 @@ class HarnessPlannerNode:
                     "error": None,
                 }
 
-            prompt = build_retry_prompt(missing_updates, garbled_documents, forbidden_changes)
+            prompt = build_retry_prompt(missing_updates, unchanged_without_reason, garbled_documents, forbidden_changes)
 
         final_after_snapshots = collect_document_snapshots(target_directory)
         final_missing_updates = find_missing_updates(before_snapshots, final_after_snapshots)
+        final_unchanged_without_reason = find_unchanged_without_reason(
+            before_snapshots,
+            final_after_snapshots,
+            attempts[-1].get("stdout", "") if attempts else "",
+        )
         final_garbled_documents = find_garbled_documents(final_after_snapshots)
         final_project_files = snapshot_project_files(target_directory)
         final_forbidden_changes = find_forbidden_changes(
             before_project_files, final_project_files
         )
         logger.warning(
-            "Harness planner ended with unresolved documents: missing=%s garbled=%s forbidden=%s",
+            "Harness planner ended with unresolved documents: missing=%s unchanged_without_reason=%s garbled=%s forbidden=%s",
             final_missing_updates,
+            final_unchanged_without_reason,
             final_garbled_documents,
             final_forbidden_changes,
         )
         return {
             "status": "error",
-            "error": summarize_failures(final_missing_updates, final_garbled_documents, final_forbidden_changes, last_stderr),
+            "error": summarize_failures(
+                final_missing_updates,
+                final_unchanged_without_reason,
+                final_garbled_documents,
+                final_forbidden_changes,
+                last_stderr,
+            ),
             "results": {
                 "target_directory": str(target_directory),
                 "template_directory": str(template_directory),
@@ -144,9 +165,11 @@ def build_codex_prompt(target_directory: Path, template_directory: Path, snapsho
             "Read PLANER.md in the current project before making any changes.",
             "Update only AGENT.md, FEATURES.md, PROGRESS.md, and DECISIONS.md.",
             "Read PLANER.md, but never modify PLANER.md or any other file.",
-            "FEATURES.md and PROGRESS.md must be updated in this planning pass.",
-            "DECISIONS.md and AGENT.md may remain unchanged when no new decision or project information applies.",
+            "PROGRESS.md must be updated in this planning pass.",
+            "FEATURES.md must be updated when there is a new feature or feature status change; otherwise it may remain unchanged only with an explicit reason.",
+            "DECISIONS.md and AGENT.md may remain unchanged only when no new decision or project information applies, with an explicit reason.",
             "Keep all tracked documents in clean UTF-8 and avoid garbled text.",
+            "For every unchanged optional document, include exactly one final response line: HARNESS_DOCUMENT_DECISION: <filename>=unchanged; reason=<具体原因>",
             "Tracked document status before the run:",
             *planned_status,
             "Any change outside the four allowed files is a failure and must be corrected.",
@@ -156,6 +179,7 @@ def build_codex_prompt(target_directory: Path, template_directory: Path, snapsho
 
 def build_retry_prompt(
     missing_updates: List[str],
+    unchanged_without_reason: List[str],
     garbled_documents: List[str],
     forbidden_changes: List[str],
 ) -> str:
@@ -167,6 +191,11 @@ def build_retry_prompt(
     ]
     if missing_updates:
         lines.append(f"Files that did not change: {', '.join(missing_updates)}")
+    if unchanged_without_reason:
+        lines.append(
+            "These unchanged documents have no explicit valid reason in the final response: "
+            + ", ".join(unchanged_without_reason)
+        )
     if garbled_documents:
         lines.append(f"Files with garbled text: {', '.join(garbled_documents)}")
     if forbidden_changes:
@@ -174,7 +203,7 @@ def build_retry_prompt(
     lines.extend(
         [
             "Do not leave the issue unresolved.",
-            "If DECISIONS.md or AGENT.md needs no change, leave it unchanged; only FEATURES.md and PROGRESS.md are mandatory updates.",
+            "If an optional document truly needs no change, leave it unchanged and provide the required HARNESS_DOCUMENT_DECISION line with a concrete reason.",
             "Revert every forbidden change, then update only the four allowed files.",
             "Prefer minimal, maintainable edits.",
         ]
@@ -276,6 +305,34 @@ def contains_garble(text: str) -> bool:
     return any(pattern in text for pattern in GARBLED_PATTERNS)
 
 
+DOCUMENT_DECISION_PATTERN = re.compile(
+    r"HARNESS_DOCUMENT_DECISION:\s*(AGENT\.md|FEATURES\.md|DECISIONS\.md)\s*=\s*unchanged\s*;\s*reason\s*=\s*(.+)",
+    re.IGNORECASE,
+)
+
+
+def find_unchanged_without_reason(
+    before_snapshots: Dict[str, DocumentSnapshot],
+    after_snapshots: Dict[str, DocumentSnapshot],
+    output: str,
+) -> List[str]:
+    """Require a concrete Codex explanation for every unchanged optional document."""
+
+    decisions = {
+        match.group(1).upper(): match.group(2).strip()
+        for match in DOCUMENT_DECISION_PATTERN.finditer(output or "")
+        if match.group(2).strip()
+    }
+    missing_reasons: List[str] = []
+    for filename in OPTIONAL_DOCUMENTS:
+        before = before_snapshots[filename]
+        after = after_snapshots[filename]
+        if before.exists and after.exists and before.sha256 == after.sha256:
+            if filename.upper() not in decisions:
+                missing_reasons.append(filename)
+    return missing_reasons
+
+
 def find_missing_updates(
     before_snapshots: Dict[str, DocumentSnapshot],
     after_snapshots: Dict[str, DocumentSnapshot],
@@ -314,6 +371,7 @@ def snapshots_to_json(snapshots: Dict[str, DocumentSnapshot]) -> Dict[str, Dict[
 
 def summarize_failures(
     missing_updates: List[str],
+    unchanged_without_reason: List[str],
     garbled_documents: List[str],
     forbidden_changes: List[str],
     last_error: str,
@@ -323,6 +381,11 @@ def summarize_failures(
     parts: List[str] = []
     if missing_updates:
         parts.append(f"Missing updates: {', '.join(missing_updates)}")
+    if unchanged_without_reason:
+        parts.append(
+            "Unchanged documents without reasons: "
+            + ", ".join(unchanged_without_reason)
+        )
     if garbled_documents:
         parts.append(f"Garbled documents: {', '.join(garbled_documents)}")
     if forbidden_changes:
