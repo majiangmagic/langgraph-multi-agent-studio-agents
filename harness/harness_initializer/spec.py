@@ -45,3 +45,11 @@ def create_git_repo_creator_node():
     from app.agents.harness.harness_initializer.nodes import GitRepoCreatorNode
 
     return GitRepoCreatorNode()
+
+
+def create_git_repo_refresher_node():
+    """Create the local Git repository refresher node."""
+
+    from app.agents.harness.harness_initializer.nodes import GitRepoRefresherNode
+
+    return GitRepoRefresherNode()

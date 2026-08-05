@@ -128,7 +128,7 @@ class MarkdownCreatorNode:
 
 
 class GitRepoCreatorNode:
-    """Placeholder initialization step for future local git setup."""
+    """Create the initial local Git repository when it does not exist."""
 
     def __call__(
         self,
@@ -137,6 +137,44 @@ class GitRepoCreatorNode:
     ) -> Dict[str, Any]:
         if not state.get("should_initialize"):
             return {}
+
+        target_directory = resolve_target_directory(state)
+        target_directory.mkdir(parents=True, exist_ok=True)
+        repository_created = not (target_directory / ".git").exists()
+        if repository_created:
+            run_git_command(target_directory, ["init"])
+            run_git_command(target_directory, ["add", "-A"])
+            run_git_command(
+                target_directory,
+                [
+                    "-c", "user.name=Harness Initializer",
+                    "-c", "user.email=harness-initializer@localhost",
+                    "commit", "-m", "Initialize local Harness repository",
+                ],
+            )
+
+        return {
+            "git_initialized": True,
+            "status": "working",
+            "results": {
+                **(state.get("results") or {}),
+                "git_repository_created": repository_created,
+                "initialization_phase": "git_repo_creator",
+            },
+        }
+
+
+class GitRepoRefresherNode:
+    """Restore the project to the committed clean baseline before continuing."""
+
+    def __call__(
+        self,
+        state: HarnessInitializerState,
+        config: RunnableConfig | None = None,
+    ) -> Dict[str, Any]:
+        target_directory = resolve_target_directory(state)
+        run_git_command(target_directory, ["reset", "--hard", "HEAD"])
+        run_git_command(target_directory, ["clean", "-fdx"])
 
         clarification_answer = state.get("clarification_answer")
         if not state.get("input_sufficient") and not clarification_answer:
@@ -149,7 +187,7 @@ class GitRepoCreatorNode:
                         )
                     ),
                     "options": [],
-                    "context": "\u6587\u4ef6\u5df2\u521b\u5efa\uff0c\u8bf7\u8865\u5145\u9879\u76ee\u80cc\u666f\u3001\u6280\u672f\u6808\u548c\u5e38\u7528\u547d\u4ee4\uff0c\u4e0b\u4e00\u8f6e\u5c06\u7531 harness_planner \u5199\u5165\u6587\u6863\u3002",
+                    "context": "\u6587\u4ef6\u548c Git \u57fa\u7ebf\u5df2\u521b\u5efa\uff0c\u8bf7\u8865\u5145\u9879\u76ee\u4fe1\u606f\uff0c\u6062\u590d\u540e\u5c06\u8fdb\u5165 harness_planner\u3002",
                 })
                 or ""
             ).strip()
@@ -159,12 +197,28 @@ class GitRepoCreatorNode:
             "status": "complete",
             "results": {
                 **(state.get("results") or {}),
-                "initialization_phase": "git_repo_creator_placeholder",
-                "context_collection": "deferred_to_harness_planner"
-                if not state.get("input_sufficient")
-                else "complete",
+                "git_working_tree_clean": True,
+                "initialization_phase": "git_repo_refresher",
             },
         }
+
+
+def run_git_command(
+    target_directory: Path, arguments: List[str]
+) -> subprocess.CompletedProcess[str]:
+    """Run a Git command and fail before the workflow can continue."""
+
+    result = subprocess.run(
+        ["git", *arguments],
+        cwd=target_directory,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        output = ((result.stdout or "") + (result.stderr or "")).strip()
+        raise RuntimeError(f"Git command failed ({' '.join(arguments)}): {output}")
+    return result
 
 
 
