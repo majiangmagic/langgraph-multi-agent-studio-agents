@@ -20,4 +20,3 @@
 2. 读`FEATURES.md`了解当前完成的功能点的信息。
 3. 依据[完成定义] 检查当前的功能是否完成
 4. 回到 `FEATURES.md` 根据是否完成来更新内容、然后用git提交成一个checkpoint。
-5. 运行`\harness\check.py`脚本，汇报结果。
