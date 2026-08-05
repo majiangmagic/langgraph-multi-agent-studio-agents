@@ -59,32 +59,26 @@ class EnvironmentCheckerNode:
         input_sufficient, missing_information = assess_project_context(
             source_text, state.get("workflow_inputs") or {}
         )
-        while not input_sufficient:
-            question = build_context_question(missing_information)
-            clarification_answer = str(
-                interrupt({
-                    "kind": "workflow.clarification",
-                    "question": question,
-                    "options": [],
-                    "context": "\u9996\u6b21\u521d\u59cb\u5316\u9700\u8981\u9879\u76ee\u80cc\u666f\u3001\u6280\u672f\u6808\u548c\u5e38\u7528\u547d\u4ee4\uff0c\u56de\u7b54\u540e\u5c06\u7ee7\u7eed\u6267\u884c\u3002",
-                })
-                or ""
-            ).strip()
-            source_text = "\n".join(
-                value for value in (source_text, clarification_answer) if value
-            )
-            input_sufficient, missing_information = assess_project_context(
-                source_text, state.get("workflow_inputs") or {}
-            )
 
         return {
             "target_directory": str(target_directory),
             "harness_template_directory": str(template_directory),
             "should_initialize": True,
-            "input_sufficient": True,
+            "input_sufficient": input_sufficient,
             "clarification_answer": clarification_answer,
-            "clarification_request": None,
-            "skip_reason": None,
+            "clarification_request": (
+                {
+                    "question": build_context_question(missing_information),
+                    "missing_information": missing_information,
+                }
+                if not input_sufficient
+                else None
+            ),
+            "skip_reason": (
+                "\u9996\u6b21\u521d\u59cb\u5316\u5f85\u8865\u5145\u9879\u76ee\u57fa\u7840\u4fe1\u606f\u3002"
+                if not input_sufficient
+                else None
+            ),
             "status": "working",
             "results": {
                 "fresh_environment": True,
@@ -144,11 +138,31 @@ class GitRepoCreatorNode:
         if not state.get("should_initialize"):
             return {}
 
+        clarification_answer = state.get("clarification_answer")
+        if not state.get("input_sufficient") and not clarification_answer:
+            clarification_answer = str(
+                interrupt({
+                    "kind": "workflow.clarification",
+                    "question": build_context_question(
+                        (state.get("clarification_request") or {}).get(
+                            "missing_information", []
+                        )
+                    ),
+                    "options": [],
+                    "context": "\u6587\u4ef6\u5df2\u521b\u5efa\uff0c\u8bf7\u8865\u5145\u9879\u76ee\u80cc\u666f\u3001\u6280\u672f\u6808\u548c\u5e38\u7528\u547d\u4ee4\uff0c\u4e0b\u4e00\u8f6e\u5c06\u7531 harness_planner \u5199\u5165\u6587\u6863\u3002",
+                })
+                or ""
+            ).strip()
+
         return {
+            "clarification_answer": clarification_answer,
             "status": "complete",
             "results": {
                 **(state.get("results") or {}),
                 "initialization_phase": "git_repo_creator_placeholder",
+                "context_collection": "deferred_to_harness_planner"
+                if not state.get("input_sufficient")
+                else "complete",
             },
         }
 
