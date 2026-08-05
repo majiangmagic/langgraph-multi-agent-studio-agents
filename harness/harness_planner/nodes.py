@@ -33,6 +33,114 @@ class DocumentSnapshot:
     has_garble: bool
 
 
+
+
+class GitEnvironmentPreparerNode:
+    """Create or clean the target repository before any planner work starts."""
+
+    def __call__(
+        self,
+        state: HarnessPlannerState,
+        config: RunnableConfig | None = None,
+    ) -> Dict[str, Any]:
+        target_directory = resolve_target_directory(state)
+        if not target_directory.exists():
+            raise FileNotFoundError(f"Target directory does not exist: {target_directory}")
+        if not target_directory.is_dir():
+            raise NotADirectoryError(f"Target path is not a directory: {target_directory}")
+
+        repository_created = False
+        repository_root = find_repository_root(target_directory)
+        has_local_git_metadata = (target_directory / ".git").exists()
+        if not has_local_git_metadata:
+            run_git(target_directory, ["init"])
+            repository_created = True
+            repository_root = target_directory
+
+        if repository_root != target_directory:
+            raise ValueError(
+                f"Target directory must be the repository root before planner cleanup: "
+                f"{target_directory}; detected repository root: {repository_root}"
+            )
+
+        if not has_git_head(target_directory):
+            run_git(target_directory, ["add", "-A"])
+            run_git(
+                target_directory,
+                [
+                    "-c",
+                    "user.name=Harness Planner",
+                    "-c",
+                    "user.email=harness-planner@localhost",
+                    "commit",
+                    "-m",
+                    "Initialize local Harness planner repository",
+                ],
+            )
+
+        run_git(target_directory, ["reset", "--hard", "HEAD"])
+        run_git(target_directory, ["clean", "-fdx"])
+        return {
+            "status": "complete",
+            "results": {
+                **(state.get("results") or {}),
+                "git_environment": {
+                    "repository_created": repository_created,
+                    "repository_root": str(repository_root),
+                    "working_tree_clean": True,
+                },
+            },
+            "error": None,
+        }
+
+
+def has_git_head(target_directory: Path) -> bool:
+    """Return whether the local repository has a commit to reset to."""
+
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        cwd=target_directory,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def find_repository_root(target_directory: Path) -> Path | None:
+    """Return the exact repository root, or None when no repository exists."""
+
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=target_directory,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    root_text = result.stdout.strip()
+    return Path(root_text).resolve() if root_text else None
+
+
+def run_git(target_directory: Path, arguments: List[str]) -> subprocess.CompletedProcess[str]:
+    """Run a Git command and fail before planner work if it cannot complete."""
+
+    result = subprocess.run(
+        ["git", *arguments],
+        cwd=target_directory,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        output = ((result.stdout or "") + (result.stderr or "")).strip()
+        raise RuntimeError(
+            f"Git command failed ({' '.join(arguments)}): {output}"
+        )
+    return result
+
+
 class HarnessPlannerNode:
     """Plan the next maintenance pass for an existing project."""
 

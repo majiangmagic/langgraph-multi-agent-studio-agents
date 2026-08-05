@@ -2,7 +2,7 @@
 
 from langgraph.graph import END, StateGraph
 
-from app.agents.harness.harness_planner.nodes import HarnessPlannerNode
+from app.agents.harness.harness_planner.nodes import GitEnvironmentPreparerNode, HarnessPlannerNode
 from app.agents.harness.harness_planner.spec import HARNESS_PLANNER_AGENT_NAME
 from app.agents.harness.harness_planner.state import HarnessPlannerState
 from app.agents.registry import agent_registry
@@ -13,9 +13,11 @@ class HarnessPlannerGraph:
 
     def build_graph(self):
         workflow = StateGraph(HarnessPlannerState)
+        workflow.add_node("git_environment_preparer", GitEnvironmentPreparerNode())
         workflow.add_node(HARNESS_PLANNER_AGENT_NAME, HarnessPlannerNode())
+        workflow.add_edge("git_environment_preparer", HARNESS_PLANNER_AGENT_NAME)
         workflow.add_edge(HARNESS_PLANNER_AGENT_NAME, END)
-        workflow.set_entry_point(HARNESS_PLANNER_AGENT_NAME)
+        workflow.set_entry_point("git_environment_preparer")
         return workflow.compile()
 
 
