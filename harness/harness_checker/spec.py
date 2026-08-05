@@ -3,17 +3,17 @@
 from app.agents.harness.harness_checker.nodes import (
     FunctionalityCheckerNode,
     GitCheckpointCreatorNode,
-    OtherCheckNode,
+    DocumentCheckerNode,
 )
 
 HARNESS_CHECKER_AGENT_NAME = "harness_checker"
 HARNESS_CHECKER_ENTRYPOINT = "functionality_checker"
 
 
-def create_other_check_node() -> OtherCheckNode:
-    """Create the all-Markdown garble checker."""
+def create_document_checker_node() -> DocumentCheckerNode:
+    """Create the node that runs all Harness check.py validations."""
 
-    return OtherCheckNode()
+    return DocumentCheckerNode()
 
 
 def create_functionality_checker_node() -> FunctionalityCheckerNode:

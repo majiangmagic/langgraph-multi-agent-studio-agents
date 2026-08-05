@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -20,6 +21,7 @@ CHECK_SUMMARY_PATTERN = re.compile(
     r"HARNESS_CHECK_SUMMARY:\s*(.+)",
     re.IGNORECASE,
 )
+DOCUMENT_ONLY_REMAKE_MARKER = "DOCUMENT_ONLY_REMAKE"
 
 
 class FunctionalityCheckerNode:
@@ -91,8 +93,8 @@ class FunctionalityCheckerNode:
         }
 
 
-class OtherCheckNode:
-    """Run the project's Harness check.py other_check operation."""
+class DocumentCheckerNode:
+    """Run every check exposed by the project's Harness check.py script."""
 
     def __call__(self, state: HarnessCheckerState) -> Dict[str, Any]:
         target_directory = resolve_target_directory(state)
@@ -101,8 +103,10 @@ class OtherCheckNode:
             return build_remake_result(
                 state,
                 target_directory,
-                "harness/check.py does not exist; Markdown validation cannot run.",
-                "other_check",
+                build_document_only_remake_report(
+                    "harness/check.py does not exist; document validation cannot run."
+                ),
+                "document_checker",
             )
 
         result = subprocess.run(
@@ -111,29 +115,32 @@ class OtherCheckNode:
                 str(script_path),
                 str(target_directory),
                 "--operation",
-                "other_check",
+                "All_Check",
             ],
             cwd=target_directory,
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=build_utf8_subprocess_environment(),
             check=False,
         )
         report = (result.stdout or result.stderr).strip()
+        if result.returncode != 0:
+            return build_remake_result(
+                state,
+                target_directory,
+                build_document_only_remake_report(
+                    report or "harness/check.py All_Check failed."
+                ),
+                "document_checker",
+            )
+
         markdown_files_checked = sum(
             1
             for path in target_directory.rglob("*.md")
             if path.is_file() and ".git" not in path.parts
         )
-        if result.returncode != 0:
-            return build_remake_result(
-                state,
-                target_directory,
-                report or "harness/check.py other_check failed.",
-                "other_check",
-            )
-
         return {
             "status": "verified",
             "error": None,
@@ -145,8 +152,8 @@ class OtherCheckNode:
                 "markdown_issues": [],
                 "remake_required": False,
                 "remake_report": "",
-                "check_phase": "other_check",
-                "other_check_output": report,
+                "check_phase": "document_checker",
+                "document_check_output": report,
             },
         }
 
@@ -201,6 +208,16 @@ class GitCheckpointCreatorNode:
 
 
 
+
+def build_utf8_subprocess_environment() -> Dict[str, str]:
+    """Force Python child-process streams to use UTF-8 on every platform."""
+
+    environment = os.environ.copy()
+    environment["PYTHONIOENCODING"] = "utf-8"
+    environment["PYTHONUTF8"] = "1"
+    return environment
+
+
 def build_checker_prompt() -> str:
     """Build the Codex CLI prompt used for functional validation."""
 
@@ -212,6 +229,8 @@ def build_checker_prompt() -> str:
             "Read FEATURES.md through the Harness scripts when CHECKER.md requires it.",
             "Run the required unit, integration, and end-to-end checks in order when those layers exist.",
             "Do not implement fixes and do not hide failures. Your job is validation and reporting.",
+            "Read every Markdown document as UTF-8. If you find garbled text, the Unicode replacement character U+FFFD, repeated question marks such as ???, or invalid UTF-8, report it as a failure instead of rewriting business code.",
+            "If CHECKER.md requires a Markdown update, save it as UTF-8 and verify that it can be read back without encoding damage.",
             "You may update Harness status documents only when CHECKER.md explicitly requires it.",
             "Do not create a Git commit; the workflow creates the checkpoint after every check passes.",
             "End with exactly these two lines:",
@@ -255,6 +274,23 @@ def parse_check_summary(output: str) -> str:
 
     matches = list(CHECK_SUMMARY_PATTERN.finditer(output or ""))
     return matches[-1].group(1).strip() if matches else ""
+
+
+
+def build_document_only_remake_report(check_output: str) -> str:
+    """Build a tightly scoped repair report for document validation failures."""
+
+    return "\n".join(
+        [
+            DOCUMENT_ONLY_REMAKE_MARKER,
+            "This remake round may repair documentation problems only.",
+            "Allowed: fix the Markdown documents reported by harness/check.py, repair UTF-8 encoding, remove garbled text, and update PROGRESS.md with the repair result.",
+            "Forbidden: change business code, tests, feature behavior, architecture, or task scope; do not redesign or add unrelated work.",
+            "Planner must write a document-only repair plan, and worker must execute only that document repair.",
+            "Document check report:",
+            check_output.strip(),
+        ]
+    )
 
 
 def build_remake_result(

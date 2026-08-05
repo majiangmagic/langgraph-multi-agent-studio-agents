@@ -20,6 +20,7 @@ class HarnessWorkerState(TypedDict, total=False):
     workflow_inputs: Dict[str, Any]
     request_context: Dict[str, Any]
     target_directory: Optional[str]
+    checker_results: Dict[str, Any]
     status: Optional[str]
     results: Optional[Dict[str, Any]]
     error: Optional[str]

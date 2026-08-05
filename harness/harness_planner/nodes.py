@@ -23,6 +23,7 @@ OPTIONAL_DOCUMENTS = ("AGENT.md", "FEATURES.md", "DECISIONS.md", "ARCHITECTURE.m
 READ_ONLY_DOCUMENTS = ("PLANER.md",)
 MAX_CODEX_ATTEMPTS = 2
 GARBLED_PATTERNS = ("\ufffd", "???")
+DOCUMENT_ONLY_REMAKE_MARKER = "DOCUMENT_ONLY_REMAKE"
 
 
 @dataclass(frozen=True)
@@ -58,11 +59,13 @@ class HarnessPlannerNode:
         attempts: List[Dict[str, Any]] = []
         last_stderr = ""
 
+        checker_results = state.get("checker_results") or {}
+        document_only_remake = is_document_only_remake(checker_results)
         prompt = build_codex_prompt(
             target_directory,
             template_directory,
             before_snapshots,
-            state.get("checker_results") or {},
+            checker_results,
         )
         for attempt_index in range(1, MAX_CODEX_ATTEMPTS + 1):
             result = run_codex_cli(target_directory, prompt)
@@ -113,7 +116,13 @@ class HarnessPlannerNode:
                     "error": None,
                 }
 
-            prompt = build_retry_prompt(missing_updates, unchanged_without_reason, garbled_documents, forbidden_changes)
+            prompt = build_retry_prompt(
+                missing_updates,
+                unchanged_without_reason,
+                garbled_documents,
+                forbidden_changes,
+                document_only_remake=document_only_remake,
+            )
 
         final_after_snapshots = collect_document_snapshots(target_directory)
         final_missing_updates = find_missing_updates(before_snapshots, final_after_snapshots)
@@ -155,6 +164,14 @@ class HarnessPlannerNode:
         }
 
 
+
+def is_document_only_remake(checker_results: Dict[str, Any]) -> bool:
+    """Return whether the checker requested a documentation-only repair round."""
+
+    report = str(checker_results.get("remake_report") or "")
+    return DOCUMENT_ONLY_REMAKE_MARKER in report
+
+
 def build_codex_prompt(
     target_directory: Path,
     template_directory: Path,
@@ -168,11 +185,22 @@ def build_codex_prompt(
         for name, snapshot in snapshots.items()
     ]
     checker_report = str(checker_results.get("remake_report") or "").strip()
+    document_only_remake = is_document_only_remake(checker_results)
     checker_context = (
         [
             "The previous harness_checker rejected the implementation and requested remake.",
             f"Checker report: {checker_report}",
             "Turn this report into a concrete repair plan in PROGRESS.md for harness_worker.",
+            *(
+                [
+                    "This is a DOCUMENT_ONLY_REMAKE round.",
+                    "Plan only the document repairs named by the checker report.",
+                    "Do not plan business-code, test, feature-behavior, architecture, or scope changes.",
+                    "Preserve the DOCUMENT_ONLY_REMAKE marker and document-only limits in PROGRESS.md so harness_worker cannot mistake the task scope.",
+                ]
+                if document_only_remake
+                else []
+            ),
         ]
         if checker_report
         else []
@@ -188,7 +216,8 @@ def build_codex_prompt(
             "PROGRESS.md must be updated in this planning pass.",
             "FEATURES.md must be updated when there is a new feature or feature status change; otherwise it may remain unchanged only with an explicit reason.",
             "DECISIONS.md, AGENT.md, and ARCHITECTURE.md may remain unchanged only when no new decision, project information, or architecture change applies, with an explicit reason.",
-            "Keep all tracked documents in clean UTF-8 and avoid garbled text.",
+            "Write every Markdown document as UTF-8 and read it back as UTF-8 after editing.",
+            "Never write garbled text, the Unicode replacement character U+FFFD, repeated question marks such as ???, or text damaged by an encoding conversion.",
             "For every unchanged optional document, include exactly one final response line: HARNESS_DOCUMENT_DECISION: <filename>=unchanged; reason=<具体原因>",
             *checker_context,
             "Tracked document status before the run:",
@@ -203,13 +232,22 @@ def build_retry_prompt(
     unchanged_without_reason: List[str],
     garbled_documents: List[str],
     forbidden_changes: List[str],
+    document_only_remake: bool = False,
 ) -> str:
     """Build a stricter follow-up prompt after an incomplete Codex run."""
 
     lines = [
         "The previous run did not fully satisfy the planner rules.",
         "Please open PLANER.md again and complete the planning pass.",
+        "All Markdown edits must remain valid UTF-8 and must not contain garbled text, Unicode replacement character U+FFFD, or repeated question marks such as ???.",
     ]
+    if document_only_remake:
+        lines.extend(
+            [
+                "This remains a DOCUMENT_ONLY_REMAKE round.",
+                "Only plan the reported document repairs; do not plan or modify business code, tests, behavior, architecture, or unrelated scope.",
+            ]
+        )
     if missing_updates:
         lines.append(f"Files that did not change: {', '.join(missing_updates)}")
     if unchanged_without_reason:
@@ -250,6 +288,8 @@ def run_codex_cli(target_directory: Path, prompt: str) -> subprocess.CompletedPr
         cwd=target_directory,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
 

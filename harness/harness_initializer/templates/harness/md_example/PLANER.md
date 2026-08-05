@@ -10,5 +10,5 @@
 
 ## 每次会话要做的事情
 1. 读 `PROGRESS.md` 了解当前状态；
-2. 将会话提出的一个或者多个新功能点用`\harness\harness_context.py`脚本补充进 `FEATURES.md`以及分析 `PROGRESS.md`上一次完成的内容把相关的功能点状态更新进`FEATURES.md`，再按照优先级选取第一个功能点标记为开始、若  `PROGRESS.md` 里还有未完成的任务，则先只新增功能点不选择任务标记为开始，切记每次只做一个功能点
+2. 将会话提出的一个或者多个新功能点用`\harness\harness_context.py`脚本补充进 `FEATURES.md`以及分析 `PROGRESS.md`上一次完成的内容把相关的功能点状态更新进`FEATURES.md`然后移除`PROGRESS.md`内非本轮会话的过时完成项目，再按照优先级选取第一个功能点标记为开始、若  `PROGRESS.md` 里还有未完成的任务，则先只新增功能点不选择任务标记为开始，切记每次只做一个功能点
 3.  回到 `PROGRESS.md` 分析是否需要更新其内容后，把功能点内的步骤分解添加进去或者不添加、如需再去`DECISIONS.md` 新增本次决策的理由。

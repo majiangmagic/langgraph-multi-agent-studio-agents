@@ -5,7 +5,7 @@ from langgraph.graph import END, StateGraph
 from app.agents.harness.harness_checker.nodes import (
     FunctionalityCheckerNode,
     GitCheckpointCreatorNode,
-    OtherCheckNode,
+    DocumentCheckerNode,
 )
 from app.agents.harness.harness_checker.spec import HARNESS_CHECKER_AGENT_NAME
 from app.agents.harness.harness_checker.state import HarnessCheckerState
@@ -18,16 +18,16 @@ class HarnessCheckerGraph:
     def build_graph(self):
         workflow = StateGraph(HarnessCheckerState)
         workflow.add_node("functionality_checker", FunctionalityCheckerNode())
-        workflow.add_node("other_check", OtherCheckNode())
+        workflow.add_node("document_checker", DocumentCheckerNode())
         workflow.add_node("git_checkpoint_creator", GitCheckpointCreatorNode())
         workflow.add_conditional_edges(
             "functionality_checker",
             route_after_functionality_check,
-            {"check_markdown": "other_check", "remake": END},
+            {"check_documents": "document_checker", "remake": END},
         )
         workflow.add_conditional_edges(
-            "other_check",
-            route_after_other_check,
+            "document_checker",
+            route_after_document_check,
             {"archive": "git_checkpoint_creator", "remake": END},
         )
         workflow.add_edge("git_checkpoint_creator", END)
@@ -36,13 +36,13 @@ class HarnessCheckerGraph:
 
 
 def route_after_functionality_check(state: HarnessCheckerState) -> str:
-    """Check Markdown only when functional validation passed."""
+    """Run all Harness document checks after functionality validation passes."""
 
-    return "check_markdown" if state.get("status") == "checking" else "remake"
+    return "check_documents" if state.get("status") == "checking" else "remake"
 
 
-def route_after_other_check(state: HarnessCheckerState) -> str:
-    """Archive only when every Markdown file passed other_check."""
+def route_after_document_check(state: HarnessCheckerState) -> str:
+    """Archive only when every check.py validation passes."""
 
     return "archive" if state.get("status") == "verified" else "remake"
 

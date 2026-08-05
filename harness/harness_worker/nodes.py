@@ -13,6 +13,9 @@ from app.agents.harness.harness_initializer.nodes import resolve_target_director
 from app.agents.harness.harness_worker.state import HarnessWorkerState
 
 
+DOCUMENT_ONLY_REMAKE_MARKER = "DOCUMENT_ONLY_REMAKE"
+
+
 class HarnessWorkerNode:
     """Use Codex CLI to execute and record the current work."""
 
@@ -34,7 +37,8 @@ class HarnessWorkerNode:
             raise ValueError("RUNTIME.md is empty; harness_worker cannot start work")
 
         attempts = []
-        prompt = build_worker_prompt()
+        checker_results = state.get("checker_results") or {}
+        prompt = build_worker_prompt(checker_results)
         for attempt_number in range(1, MAX_CODEX_ATTEMPTS + 1):
             before_hash = hash_file(progress_path)
             result = run_codex_cli(target_directory, prompt)
@@ -61,7 +65,11 @@ class HarnessWorkerNode:
                         "codex_status": "passed",
                     },
                 }
-            prompt = build_worker_retry_prompt(result.returncode, before_hash == after_hash)
+            prompt = build_worker_retry_prompt(
+                result.returncode,
+                before_hash == after_hash,
+                checker_results,
+            )
 
         return {
             "status": "error",
@@ -91,9 +99,22 @@ def hash_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def build_worker_prompt() -> str:
+def build_worker_prompt(checker_results: Dict[str, Any] | None = None) -> str:
     """Build the Codex instruction for executing the current planned work."""
 
+    checker_results = checker_results or {}
+    document_only_remake = DOCUMENT_ONLY_REMAKE_MARKER in str(
+        checker_results.get("remake_report") or ""
+    )
+    document_only_rules = (
+        [
+            "This is a DOCUMENT_ONLY_REMAKE round.",
+            "Repair only the documentation problems named in PROGRESS.md and the checker report.",
+            "Do not modify business code, tests, feature behavior, architecture, or unrelated files, and do not expand the task scope.",
+        ]
+        if document_only_remake
+        else []
+    )
     return "\n".join(
         [
             "You are harness_worker.",
@@ -108,6 +129,9 @@ def build_worker_prompt() -> str:
             "Do not change ARCHITECTURE.md when the implementation does not affect architecture.",
             "Run the relevant verification commands before finishing.",
             "Update PROGRESS.md with the actual execution result and remaining work.",
+            "Save every new or modified Markdown file as UTF-8, then read it back as UTF-8 before finishing.",
+            "Never produce garbled text, the Unicode replacement character U+FFFD, repeated question marks such as ???, or content damaged by encoding conversion.",
+            *document_only_rules,
             "Do not invent additional tasks outside the current plan.",
         ]
     )
@@ -116,7 +140,11 @@ def build_worker_prompt() -> str:
 MAX_CODEX_ATTEMPTS = 2
 
 
-def build_worker_retry_prompt(exit_code: int, progress_unchanged: bool) -> str:
+def build_worker_retry_prompt(
+    exit_code: int,
+    progress_unchanged: bool,
+    checker_results: Dict[str, Any] | None = None,
+) -> str:
     """Ask Codex to finish the work and update PROGRESS.md."""
 
     if progress_unchanged:
@@ -125,7 +153,7 @@ def build_worker_retry_prompt(exit_code: int, progress_unchanged: bool) -> str:
         reason = f"The previous Codex run failed with exit code {exit_code}."
     return "\n".join(
         [
-            build_worker_prompt(),
+            build_worker_prompt(checker_results),
             reason,
             "Review the actual work you performed, then update PROGRESS.md with the completed work, verification result, and remaining work before finishing.",
         ]
@@ -148,6 +176,8 @@ def run_codex_cli(target_directory: Path, prompt: str) -> subprocess.CompletedPr
         cwd=target_directory,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
 

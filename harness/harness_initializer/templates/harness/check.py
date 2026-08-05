@@ -153,9 +153,9 @@ class harness_check:
         return issues
 
     def Other_Check(self) -> list[CheckIssue]:
-        """????????? Markdown ?????????"""
+        """Check every Markdown file for encoding errors and garbled text."""
         if not self.root_dir.exists() or not self.root_dir.is_dir():
-            raise NotADirectoryError(f"?????: {self.root_dir}")
+            raise NotADirectoryError(f"Project directory does not exist: {self.root_dir}")
 
         issues: list[CheckIssue] = []
         markdown_files = sorted(
@@ -170,7 +170,7 @@ class harness_check:
             try:
                 content = path.read_text(encoding="utf-8")
             except UnicodeDecodeError:
-                issues.append(CheckIssue(path, "??????? UTF-8 ??"))
+                issues.append(CheckIssue(path, "File is not valid UTF-8"))
                 continue
 
             matched_pattern = next(
@@ -178,17 +178,18 @@ class harness_check:
                 None,
             )
             if matched_pattern is not None:
-                issues.append(CheckIssue(path, f"??????? {matched_pattern!r}"))
+                issues.append(CheckIssue(path, f"Garbled text pattern detected: {matched_pattern!r}"))
 
         return issues
 
     def All_Check(self) -> list[CheckIssue]:
-        """?????? Harness ?????"""
+        """Run all Harness document checks and the project Markdown scan."""
         issues: list[CheckIssue] = []
         issues.extend(self.Progress_Check())
         issues.extend(self.Decisions_Check())
         issues.extend(self.Features_Check())
         issues.extend(self.Architecture_Check())
+        issues.extend(self.Other_Check())
         return issues
 
 
