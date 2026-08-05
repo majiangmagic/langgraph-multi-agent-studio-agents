@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from pathlib import Path
 from typing import Any, Dict
@@ -13,7 +14,7 @@ from app.agents.harness.harness_worker.state import HarnessWorkerState
 
 
 class HarnessWorkerNode:
-    """Use Codex CLI to execute the current work described in PROGRESS.md."""
+    """Use Codex CLI to execute and record the current work."""
 
     def __call__(
         self,
@@ -27,41 +28,50 @@ class HarnessWorkerNode:
             raise FileNotFoundError(f"PROGRESS.md does not exist: {progress_path}")
         if not runtime_path.is_file():
             raise FileNotFoundError(f"RUNTIME.md does not exist: {runtime_path}")
-
-        progress_text = read_required_document(progress_path)
-        runtime_text = read_required_document(runtime_path)
-        if not progress_text.strip():
+        if not read_required_document(progress_path).strip():
             raise ValueError("PROGRESS.md is empty; harness_worker has no work to execute")
-        if not runtime_text.strip():
+        if not read_required_document(runtime_path).strip():
             raise ValueError("RUNTIME.md is empty; harness_worker cannot start work")
 
-        verify_planner_updated_progress(state)
-        result = run_codex_cli(target_directory)
-        execution = {
-            "exit_code": result.returncode,
-            "stdout": result.stdout[-12000:],
-            "stderr": result.stderr[-12000:],
-        }
-        if result.returncode != 0:
-            return {
-                "status": "error",
-                "error": summarize_codex_failure(result),
-                "results": {
-                    "target_directory": str(target_directory),
-                    "progress_path": str(progress_path),
-                    "execution": execution,
-                },
+        attempts = []
+        prompt = build_worker_prompt()
+        for attempt_number in range(1, MAX_CODEX_ATTEMPTS + 1):
+            before_hash = hash_file(progress_path)
+            result = run_codex_cli(target_directory, prompt)
+            after_hash = hash_file(progress_path)
+            execution = {
+                "attempt": attempt_number,
+                "exit_code": result.returncode,
+                "progress_before_sha256": before_hash,
+                "progress_after_sha256": after_hash,
+                "progress_changed": before_hash != after_hash,
+                "stdout": result.stdout[-12000:],
+                "stderr": result.stderr[-12000:],
             }
+            attempts.append(execution)
+            if result.returncode == 0 and before_hash != after_hash:
+                return {
+                    "status": "complete",
+                    "error": None,
+                    "results": {
+                        "target_directory": str(target_directory),
+                        "progress_path": str(progress_path),
+                        "runtime_path": str(runtime_path),
+                        "attempts": attempts,
+                        "codex_status": "passed",
+                    },
+                }
+            prompt = build_worker_retry_prompt(result.returncode, before_hash == after_hash)
 
         return {
-            "status": "complete",
-            "error": None,
+            "status": "error",
+            "error": "harness_worker Codex CLI did not update PROGRESS.md after two attempts; it may have forgotten to update the document.",
             "results": {
                 "target_directory": str(target_directory),
                 "progress_path": str(progress_path),
                 "runtime_path": str(runtime_path),
-                "execution": execution,
-                "codex_status": "passed",
+                "attempts": attempts,
+                "codex_status": "failed",
             },
         }
 
@@ -75,22 +85,10 @@ def read_required_document(path: Path) -> str:
         raise ValueError(f"{path.name} is not valid UTF-8: {path}") from exc
 
 
-def verify_planner_updated_progress(state: HarnessWorkerState) -> None:
-    """Refuse to start work unless the planner changed the current PROGRESS.md."""
+def hash_file(path: Path) -> str:
+    """Return the SHA-256 hash of a document."""
 
-    planner_results = state.get("planner_results") or {}
-    before_snapshots = planner_results.get("before_snapshots") or {}
-    after_snapshots = planner_results.get("after_snapshots") or {}
-    before_progress = before_snapshots.get("PROGRESS.md") or {}
-    after_progress = after_snapshots.get("PROGRESS.md") or {}
-    before_hash = before_progress.get("sha256")
-    after_hash = after_progress.get("sha256")
-
-    if not before_hash or not after_hash or before_hash == after_hash:
-        raise ValueError(
-            "harness_planner did not update PROGRESS.md; ask the planner to update "
-            "PROGRESS.md before starting harness_worker"
-        )
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def build_worker_prompt() -> str:
@@ -112,7 +110,26 @@ def build_worker_prompt() -> str:
     )
 
 
-def run_codex_cli(target_directory: Path) -> subprocess.CompletedProcess[str]:
+MAX_CODEX_ATTEMPTS = 2
+
+
+def build_worker_retry_prompt(exit_code: int, progress_unchanged: bool) -> str:
+    """Ask Codex to finish the work and update PROGRESS.md."""
+
+    if progress_unchanged:
+        reason = "PROGRESS.md did not change; did you forget to update the document?"
+    else:
+        reason = f"The previous Codex run failed with exit code {exit_code}."
+    return "\n".join(
+        [
+            build_worker_prompt(),
+            reason,
+            "Review the actual work you performed, then update PROGRESS.md with the completed work, verification result, and remaining work before finishing.",
+        ]
+    )
+
+
+def run_codex_cli(target_directory: Path, prompt: str) -> subprocess.CompletedProcess[str]:
     """Run Codex CLI in the target project directory."""
 
     return subprocess.run(
@@ -123,7 +140,7 @@ def run_codex_cli(target_directory: Path) -> subprocess.CompletedProcess[str]:
             str(target_directory),
             "--skip-git-repo-check",
             "--dangerously-bypass-approvals-and-sandbox",
-            build_worker_prompt(),
+            prompt,
         ],
         cwd=target_directory,
         capture_output=True,

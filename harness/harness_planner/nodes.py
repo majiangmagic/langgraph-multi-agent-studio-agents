@@ -16,7 +16,8 @@ from app.agents.harness.harness_planner.state import HarnessPlannerState
 
 
 logger = logging.getLogger(__name__)
-PLANNED_DOCUMENTS = ("AGENT.md", "FEATURES.md", "PROGRESS.md", "DECISIONS.md")
+TRACKED_DOCUMENTS = ("AGENT.md", "FEATURES.md", "PROGRESS.md", "DECISIONS.md")
+REQUIRED_UPDATE_DOCUMENTS = ("FEATURES.md", "PROGRESS.md")
 READ_ONLY_DOCUMENTS = ("PLANER.md",)
 MAX_CODEX_ATTEMPTS = 2
 GARBLED_PATTERNS = ("\ufffd", "???")
@@ -143,8 +144,9 @@ def build_codex_prompt(target_directory: Path, template_directory: Path, snapsho
             "Read PLANER.md in the current project before making any changes.",
             "Update only AGENT.md, FEATURES.md, PROGRESS.md, and DECISIONS.md.",
             "Read PLANER.md, but never modify PLANER.md or any other file.",
-            "Keep all four allowed files in clean UTF-8 and avoid garbled text.",
-            "If a tracked file truly does not need a change, explain why in the final response.",
+            "FEATURES.md and PROGRESS.md must be updated in this planning pass.",
+            "DECISIONS.md and AGENT.md may remain unchanged when no new decision or project information applies.",
+            "Keep all tracked documents in clean UTF-8 and avoid garbled text.",
             "Tracked document status before the run:",
             *planned_status,
             "Any change outside the four allowed files is a failure and must be corrected.",
@@ -161,7 +163,7 @@ def build_retry_prompt(
 
     lines = [
         "The previous run did not fully satisfy the planner rules.",
-        "Please open PLANER.md again and make sure the required files are updated.",
+        "Please open PLANER.md again and complete the planning pass.",
     ]
     if missing_updates:
         lines.append(f"Files that did not change: {', '.join(missing_updates)}")
@@ -172,7 +174,7 @@ def build_retry_prompt(
     lines.extend(
         [
             "Do not leave the issue unresolved.",
-            "If a file still needs no change, state the reason clearly in the final response.",
+            "If DECISIONS.md or AGENT.md needs no change, leave it unchanged; only FEATURES.md and PROGRESS.md are mandatory updates.",
             "Revert every forbidden change, then update only the four allowed files.",
             "Prefer minimal, maintainable edits.",
         ]
@@ -222,7 +224,7 @@ def find_forbidden_changes(
 ) -> List[str]:
     """Return files changed outside the planner's four allowed documents."""
 
-    allowed_files = set(PLANNED_DOCUMENTS)
+    allowed_files = set(TRACKED_DOCUMENTS)
     changed_files = {
         filename
         for filename in set(before_files) | set(after_files)
@@ -234,7 +236,7 @@ def find_forbidden_changes(
 def collect_document_snapshots(target_directory: Path) -> Dict[str, DocumentSnapshot]:
     """Collect file hashes and garble state for the tracked documents."""
 
-    return {filename: snapshot_document(target_directory / filename) for filename in PLANNED_DOCUMENTS}
+    return {filename: snapshot_document(target_directory / filename) for filename in TRACKED_DOCUMENTS}
 
 
 def snapshot_document(path: Path) -> DocumentSnapshot:
@@ -281,13 +283,10 @@ def find_missing_updates(
     """Return tracked documents whose content did not change."""
 
     missing: List[str] = []
-    for filename in PLANNED_DOCUMENTS:
+    for filename in REQUIRED_UPDATE_DOCUMENTS:
         before = before_snapshots[filename]
         after = after_snapshots[filename]
-        if not after.exists:
-            missing.append(filename)
-            continue
-        if before.exists and before.sha256 == after.sha256:
+        if not after.exists or (before.exists and before.sha256 == after.sha256):
             missing.append(filename)
     return missing
 
