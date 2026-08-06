@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import fnmatch
+import os
 import shutil
 import subprocess
 import sys
@@ -15,6 +17,71 @@ from app.agents.harness.harness_initializer.spec import SCRIPT_CREATED_DOCUMENTS
 from app.agents.harness.harness_initializer.state import HarnessInitializerState
 
 
+CORE_SOURCE_EXTENSIONS = {
+    ".py", ".pyw", ".pyx", ".pyi",
+    ".c", ".h", ".cc", ".cp", ".cxx", ".cpp", ".c++",
+    ".hh", ".hpp", ".hxx", ".h++", ".ipp", ".inl",
+    ".rs", ".go", ".java", ".kt", ".kts", ".groovy", ".scala",
+    ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
+    ".cs", ".fs", ".fsx", ".vb", ".swift", ".m", ".mm",
+    ".dart", ".rb", ".php", ".pl", ".pm", ".sh", ".bash",
+    ".zsh", ".fish", ".ps1", ".bat", ".cmd", ".lua", ".r",
+    ".ex", ".exs", ".erl", ".hrl", ".clj", ".cljs", ".lisp",
+    ".sol", ".zig", ".nim", ".hs", ".lhs", ".ml", ".mli",
+    ".pas", ".pp", ".asm", ".s", ".jl", ".v", ".vh", ".vhd",
+    ".vhdl", ".sql", ".proto", ".graphql", ".gql", ".tf",
+    ".hcl", ".html", ".htm", ".vue", ".svelte", ".astro",
+    ".css", ".scss", ".sass", ".less", ".styl",
+}
+PROJECT_MARKER_NAMES = {
+    "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt",
+    "pipfile", "poetry.lock", "uv.lock", "tox.ini", "pytest.ini",
+    "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
+    "bun.lockb", "tsconfig.json", "cargo.toml", "cargo.lock",
+    "go.mod", "go.sum", "pom.xml", "build.gradle", "build.gradle.kts",
+    "settings.gradle", "settings.gradle.kts", "gradlew", "cmakelists.txt",
+    "makefile", "meson.build", "configure.ac", "configure", "composer.json",
+    "gemfile", "gemfile.lock", "pubspec.yaml", "mix.exs", "rebar.config",
+    "global.json", "directory.build.props", "directory.build.targets",
+    "dockerfile", "docker-compose.yml", "docker-compose.yaml",
+    "compose.yml", "compose.yaml", "justfile", "taskfile.yml",
+    "taskfile.yaml", "rakefile", "jenkinsfile", "vagrantfile",
+    "build", "workspace", "flake.nix", "shell.nix", "deno.json",
+    "deno.jsonc",
+}
+PROJECT_MARKER_PATTERNS = (
+    "*.csproj", "*.fsproj", "*.vbproj", "*.sln", "*.vcxproj", "*.pro",
+    "build.*", "vite.config.*", "webpack.config.*", "rollup.config.*",
+    "next.config.*", "nuxt.config.*", "astro.config.*", "svelte.config.*",
+)
+IGNORED_SOURCE_DIRECTORIES = {
+    ".git", ".svn", ".hg", "node_modules", "bower_components", "vendor",
+    "third_party", "external", "deps", ".venv", "venv", "env",
+    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    "dist", "build", "out", "target", "bin", "obj", "coverage",
+    "htmlcov", ".cache", "tmp", "temp", "logs", ".next", ".nuxt",
+    ".svelte-kit", ".gradle", ".idea", ".vscode",
+}
+IGNORED_SOURCE_PATTERNS = ("*.min.js", "*.map", "*.bundle.js", "*.generated.*", "*.g.cs", "*.designer.cs")
+SOURCE_LANGUAGE_BY_EXTENSION = {
+    ".py": "Python", ".pyw": "Python", ".pyx": "Python", ".pyi": "Python",
+    ".c": "C", ".h": "C/C++", ".cc": "C++", ".cp": "C++", ".cxx": "C++", ".cpp": "C++", ".c++": "C++",
+    ".hpp": "C++", ".rs": "Rust", ".go": "Go", ".java": "Java", ".kt": "Kotlin", ".kts": "Kotlin",
+    ".js": "JavaScript", ".jsx": "JavaScript", ".mjs": "JavaScript", ".cjs": "JavaScript",
+    ".ts": "TypeScript", ".tsx": "TypeScript", ".cs": "C#", ".fs": "F#", ".swift": "Swift",
+    ".m": "Objective-C", ".mm": "Objective-C++", ".dart": "Dart", ".rb": "Ruby", ".php": "PHP",
+    ".sh": "Shell", ".bash": "Shell", ".zsh": "Shell", ".fish": "Shell", ".ps1": "PowerShell",
+    ".bat": "Batch", ".cmd": "Batch", ".lua": "Lua", ".r": "R", ".ex": "Elixir", ".exs": "Elixir",
+    ".erl": "Erlang", ".clj": "Clojure", ".cljs": "ClojureScript", ".sol": "Solidity",
+    ".zig": "Zig", ".nim": "Nim", ".hs": "Haskell", ".lhs": "Haskell", ".ml": "OCaml",
+    ".mli": "OCaml", ".pas": "Pascal", ".pp": "Pascal", ".asm": "Assembly", ".s": "Assembly",
+    ".jl": "Julia", ".sql": "SQL", ".proto": "Protocol Buffers", ".graphql": "GraphQL",
+    ".gql": "GraphQL", ".tf": "Terraform", ".hcl": "HCL",
+    ".html": "HTML", ".htm": "HTML", ".vue": "Vue", ".svelte": "Svelte", ".astro": "Astro",
+    ".css": "CSS", ".scss": "SCSS", ".sass": "Sass", ".less": "Less", ".styl": "Stylus",
+}
+
+
 class EnvironmentCheckerNode:
     """Check whether the target directory is a fresh project."""
 
@@ -26,6 +93,7 @@ class EnvironmentCheckerNode:
         target_directory = resolve_target_directory(state)
         template_directory = resolve_template_directory(state)
         fresh_environment = is_fresh_environment(target_directory)
+        source_inspection = inspect_existing_source_code(target_directory)
         if not fresh_environment:
             skip_reason = (
                 f"Harness initializer skipped because the required documents already exist in {target_directory}"
@@ -43,6 +111,7 @@ class EnvironmentCheckerNode:
                     "fresh_environment": False,
                     "target_directory": str(target_directory),
                     "skip_reason": skip_reason,
+                    "source_inspection": source_inspection,
                 },
                 "created_files": state.get("created_files", []),
                 "created_directories": state.get("created_directories", []),
@@ -51,19 +120,31 @@ class EnvironmentCheckerNode:
                 "harness_copied": False,
             }
         clarification_answer = state.get("clarification_answer")
+        original_user_input = str(state.get("user_input") or "").strip()
+        enhanced_user_input = append_existing_code_context_task(
+            original_user_input, source_inspection
+        )
         source_text = "\n".join(
             value
-            for value in (state.get("user_input"), clarification_answer)
+            for value in (original_user_input, clarification_answer)
             if value and str(value).strip()
         )
-        input_sufficient, missing_information = assess_project_context(
-            source_text, state.get("workflow_inputs") or {}
-        )
+        if source_inspection["has_source_code"]:
+            input_sufficient = True
+            missing_information: List[str] = []
+        else:
+            input_sufficient, missing_information = assess_project_context(
+                source_text, state.get("workflow_inputs") or {}
+            )
 
         return {
             "target_directory": str(target_directory),
             "harness_template_directory": str(template_directory),
+            "user_input": enhanced_user_input,
             "should_initialize": True,
+            "has_existing_source_code": source_inspection["has_source_code"],
+            "initialization_mode": source_inspection["initialization_mode"],
+            "historical_context_required": source_inspection["has_source_code"],
             "input_sufficient": input_sufficient,
             "clarification_answer": clarification_answer,
             "clarification_request": (
@@ -83,6 +164,7 @@ class EnvironmentCheckerNode:
             "results": {
                 "fresh_environment": True,
                 "target_directory": str(target_directory),
+                "source_inspection": source_inspection,
             },
             "created_files": [],
             "created_directories": [],
@@ -222,6 +304,98 @@ def run_git_command(
 
 
 
+
+def inspect_existing_source_code(target_directory: Path) -> Dict[str, Any]:
+    """Inspect project source files and project markers outside ignored directories."""
+
+    if not target_directory.exists():
+        return build_source_inspection_result([], [], [], "none")
+    if not target_directory.is_dir():
+        raise ValueError(f"Target path is not a directory: {target_directory}")
+
+    source_files: List[str] = []
+    project_markers: List[str] = []
+    source_languages = set()
+    for directory, directory_names, filenames in os.walk(target_directory, topdown=True):
+        directory_names[:] = sorted(
+            name for name in directory_names
+            if name.casefold() not in IGNORED_SOURCE_DIRECTORIES
+        )
+        current_directory = Path(directory)
+        for filename in sorted(filenames, key=str.casefold):
+            path = current_directory / filename
+            relative_path = path.relative_to(target_directory)
+            if any(part.casefold() in IGNORED_SOURCE_DIRECTORIES for part in relative_path.parts):
+                continue
+            lower_name = filename.casefold()
+            if lower_name in PROJECT_MARKER_NAMES or any(
+                fnmatch.fnmatch(lower_name, pattern.casefold())
+                for pattern in PROJECT_MARKER_PATTERNS
+            ):
+                project_markers.append(relative_path.as_posix())
+            if path.suffix.casefold() not in CORE_SOURCE_EXTENSIONS:
+                continue
+            if any(fnmatch.fnmatch(lower_name, pattern.casefold()) for pattern in IGNORED_SOURCE_PATTERNS):
+                continue
+            source_files.append(relative_path.as_posix())
+            language = SOURCE_LANGUAGE_BY_EXTENSION.get(path.suffix.casefold())
+            if language:
+                source_languages.add(language)
+
+    source_files = sorted(source_files, key=str.casefold)
+    project_markers = sorted(project_markers, key=str.casefold)
+    confidence = "high" if source_files else ("possible" if project_markers else "none")
+    return build_source_inspection_result(
+        source_files,
+        project_markers,
+        sorted(source_languages),
+        confidence,
+    )
+
+
+def build_source_inspection_result(
+    source_files: List[str],
+    project_markers: List[str],
+    source_languages: List[str],
+    confidence: str,
+) -> Dict[str, Any]:
+    """Create the serializable source inspection result."""
+
+    has_source_code = bool(source_files)
+    return {
+        "has_source_code": has_source_code,
+        "source_code_files": source_files[:200],
+        "source_code_file_count": len(source_files),
+        "project_markers": project_markers[:100],
+        "source_languages": source_languages,
+        "detection_confidence": confidence,
+        "initialization_mode": "existing_code_bootstrap" if has_source_code else "fresh_project",
+    }
+
+
+def append_existing_code_context_task(
+    user_input: str,
+    source_inspection: Dict[str, Any],
+) -> str:
+    """Append the historical-context task when initialization finds source code."""
+
+    if not source_inspection.get("has_source_code"):
+        return user_input
+    task = """
+
+[Existing code project initialization task]
+The project is not empty; the initialization scan found source code.
+During the Planner stage, also complete these tasks:
+1. Analyze the existing code and documents, then add confirmed historical features to FEATURES.md.
+2. Add important design decisions that can be confirmed from the code to DECISIONS.md.
+3. Mark uncertain information as inferred or pending confirmation; never present it as an explicit user decision.
+4. Do not mark unfinished features as completed.
+5. Do not modify business code.
+6. Record the historical feature and decision review in PROGRESS.md.
+""".strip()
+    return f"{user_input}\n\n{task}" if user_input else task
+
+
 def assess_project_context(text: str, workflow_inputs: Dict[str, Any]) -> tuple[bool, List[str]]:
     """Check whether a fresh project request contains minimum bootstrap context."""
 
@@ -271,6 +445,7 @@ def resolve_target_directory(state: HarnessInitializerState) -> Path:
     raw_value = (
         workflow_inputs.get("target_directory")
         or workflow_inputs.get("project_directory")
+        or state.get("target_directory")
         or state.get("user_input")
         or state.get("request_context", {}).get("target_directory")
     )

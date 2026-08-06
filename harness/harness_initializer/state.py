@@ -17,6 +17,9 @@ class HarnessInitializerState(TypedDict, total=False):
     tools: List[Dict[str, Any]]
     messages: List[BaseMessage]
     user_input: Optional[str]
+    has_existing_source_code: bool
+    initialization_mode: Optional[str]
+    historical_context_required: bool
     workflow_inputs: Dict[str, Any]
     request_context: Dict[str, Any]
     target_directory: Optional[str]
